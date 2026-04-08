@@ -297,6 +297,14 @@
   .hidden { display: none !important; }
   .separator { height: 1px; background: var(--border); margin: 10px 0; }
   .mono { font-family: monospace; }
+  .battle-box { border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--surface2); margin-bottom: 10px; }
+  .battle-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .battle-log { min-height: 220px; max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); padding: 8px; }
+  .battle-log-item { font-size: 12px; margin-bottom: 6px; color: var(--text2); white-space: pre-wrap; word-break: break-word; }
+  .battle-log-item.end { color: var(--yellow); }
+  .monster-row { display: grid; grid-template-columns: 1fr 80px 130px; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .monster-row.selected { background: #1a2048; border-radius: 6px; padding: 4px; }
+  .monster-code { font-family: monospace; color: var(--text2); }
 
   @media (max-width: 900px) {
     #layout { grid-template-columns: 1fr; }
@@ -348,6 +356,15 @@
       </div>
     </div>
 
+    <!-- 一键登录 -->
+    <div class="panel" id="quick-login-panel">
+      <div class="panel-title">⚡ 一键登录</div>
+      <div class="panel-body">
+        <div id="quick-login-list" class="text-muted text-sm">暂无已保存登录</div>
+        <button class="btn btn-ghost btn-sm mt-8" onclick="loadQuickLogins()">刷新</button>
+      </div>
+    </div>
+
     <!-- 公告 + 游戏服选择 -->
     <div class="panel" id="server-panel" style="display:none">
       <div class="panel-title">📢 公告 & 服务器选择</div>
@@ -390,6 +407,7 @@
       <button class="tab-btn active" onclick="switchTab('probe')">🔍 报文探测</button>
       <button class="tab-btn" onclick="switchTab('backpack')">🎒 背包</button>
       <button class="tab-btn" onclick="switchTab('chat')">💬 聊天</button>
+      <button class="tab-btn" onclick="switchTab('battle')">⚔ 战斗</button>
     </div>
 
     <!-- 背包 Tab -->
@@ -413,6 +431,49 @@
       <div id="chat-input-row">
         <input type="text" id="chat-input" placeholder="输入消息（回车发送）" onkeydown="if(event.key==='Enter')sendChat()">
         <button class="btn btn-primary" onclick="sendChat()">发送</button>
+      </div>
+    </div>
+
+    <!-- 战斗 Tab -->
+    <div class="tab-content panel-body" id="tab-battle" style="flex-direction:column; gap:8px;">
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">怪物管理</div>
+        <div id="battle-monster-list"></div>
+        <div class="battle-row" style="margin-top:8px;">
+          <input type="text" id="battle-monster-name" placeholder="怪物名称" style="max-width:220px;">
+          <input type="text" id="battle-monster-code" placeholder="怪物代码(4位hex)" style="max-width:180px;">
+          <button class="btn btn-primary btn-sm" onclick="addMonster()">新增/更新</button>
+        </div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">战斗控制</div>
+        <div class="battle-row">
+          <span class="text-muted">当前怪物：</span>
+          <span id="battle-current-monster">未选择</span>
+          <span class="text-muted">启动延时(ms)：</span>
+          <input type="text" id="battle-loop-delay" value="1900" style="width:90px; padding:4px 8px; font-size:12px;">
+          <button id="btn-battle-loop" class="btn btn-success btn-sm" onclick="toggleBattleLoop()">开始循环战斗</button>
+          <button class="btn btn-ghost btn-sm" onclick="triggerBattleOnce()">手动单次</button>
+          <span class="text-muted" id="battle-stats">次数: 0 / 经验: - / 金币: -</span>
+        </div>
+      </div>
+
+      <div class="battle-box" style="flex:1; display:flex; flex-direction:column;">
+        <div class="battle-row" style="justify-content:space-between; margin-bottom:8px;">
+          <span style="font-size:12px; color:var(--text2);">战斗过程</span>
+          <div class="battle-row">
+            <label class="text-muted" style="font-size:12px;">
+              输出模式：
+              <select id="battle-log-mode" onchange="onBattleLogModeChange()" style="width:auto; padding:3px 6px; font-size:12px;">
+                <option value="simple" selected>精简</option>
+                <option value="detail">详细</option>
+              </select>
+            </label>
+            <button class="btn btn-ghost btn-sm" onclick="clearBattleLog()">清空</button>
+          </div>
+        </div>
+        <div id="battle-log" class="battle-log"></div>
       </div>
     </div>
 
@@ -486,13 +547,26 @@ const API = '';  // 同域，空前缀
 let selectedServer = null;  // {name, ip, port}
 let selectedRoleId = null;
 let selectedItemId = null;
-let packetRows = [];         // 当前显示的报文行
 let eventSource = null;
 let isConnected = false;
 let prevConnected = false;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 let lastConnectInfo = { account: '', password: '', loginServer: '', serverIp: '', serverPort: 0, serverName: '', roleId: '' };
+let battleMonsters = [];
+let selectedMonsterCode = '';
+let battleLoopRunning = false;
+let battleCount = 0;
+let totalBattleExp = 0;
+let totalBattleGoldCopper = 0;
+let battleNextPending = false;
+let battleAwaiting = 'idle'; // idle -> waiting_de07 -> waiting_result
+let battleRoundIndex = 0;     // 当前循环轮次（仅循环模式）
+let de07WatchTimer = null;    // 等待 de07 超时定时器
+let de07RetryCount = 0;       // 当前轮 f603 超时重试次数
+let f703WatchTimer = null;    // 等待 f703 结果超时定时器
+let battleRecoveryInProgress = false;
+let battleLogMode = 'simple'; // simple | detail
 
 // ================================================================== //
 //  工具函数                                                            //
@@ -518,7 +592,7 @@ function clearMsg(elId) {
 
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
-    const names = ['probe', 'backpack', 'chat'];
+    const names = ['probe', 'backpack', 'chat', 'battle'];
     b.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab-content').forEach(el => {
@@ -538,9 +612,16 @@ function startSSE() {
       const msg = JSON.parse(e.data);
       if (msg.type === 'status') updateStatus(msg.data);
       else if (msg.type === 'backpack') renderBackpack(msg.data);
-      else if (msg.type === 'packet') appendPacketRow(msg.data);
+      else if (msg.type === 'packet') {
+        appendPacketRow(msg.data);
+        appendBattlePacketLine(msg.data);
+      }
       else if (msg.type === 'annotation') updatePacketAnnotation(msg.data);
       else if (msg.type === 'role_stats') renderRoleStats(msg.data);
+      else if (msg.type === 'battle_response') onBattleResponse(msg.data);
+      else if (msg.type === 'battle_end') onBattleEnd(msg.data);
+      else if (msg.type === 'battle_not_killed') onBattleNotKilled(msg.data);
+      else if (msg.type === 'monsters') renderMonsterList(msg.data);
     } catch (_) {}
   };
   eventSource.onerror = () => {
@@ -626,6 +707,95 @@ function _stopHeartbeatPoll() {
 // ================================================================== //
 //  登录流程                                                            //
 // ================================================================== //
+async function performLoginFlow(info) {
+  // Step 1: 登录
+  const loginRes = await api('POST', '/api/login', {
+    account: info.account, password: info.password, server: info.loginServer
+  });
+  if (!loginRes.ok) return { ok: false, error: loginRes.error || '登录失败' };
+
+  // Step 2: 选区
+  const rolesRes = await api('POST', '/api/roles', {
+    server_ip: info.serverIp, server_port: info.serverPort
+  });
+  if (!rolesRes.ok) return { ok: false, error: rolesRes.error || '选区失败' };
+
+  // Step 3: 选角
+  const enterRes = await api('POST', '/api/select-role', { role_id: info.roleId });
+  if (!enterRes.ok) return { ok: false, error: enterRes.error || '选角失败' };
+  return { ok: true, role: enterRes.role || null };
+}
+
+async function saveQuickLoginEntry(roleObj) {
+  if (!lastConnectInfo.account || !lastConnectInfo.password || !lastConnectInfo.roleId) return;
+  await api('POST', '/api/quick-logins', {
+    account: lastConnectInfo.account,
+    password: lastConnectInfo.password,
+    login_server: lastConnectInfo.loginServer,
+    server_ip: lastConnectInfo.serverIp,
+    server_port: lastConnectInfo.serverPort,
+    server_name: lastConnectInfo.serverName,
+    role_id: lastConnectInfo.roleId,
+    role_name: roleObj?.role_name || '',
+    role_job: roleObj?.role_job || '',
+  }).catch(() => null);
+  loadQuickLogins();
+}
+
+async function loadQuickLogins() {
+  const res = await api('GET', '/api/quick-logins').catch(() => null);
+  if (!res || !res.ok) return;
+  const list = Array.isArray(res.items) ? res.items : [];
+  const box = document.getElementById('quick-login-list');
+  if (!box) return;
+  if (!list.length) {
+    box.innerHTML = '<div class="text-muted text-sm">暂无已保存登录</div>';
+    return;
+  }
+  box.innerHTML = list.map((x) => {
+    const id = escAttr(x.id || '');
+    const line = `${escHtml(x.account || '')} · ${escHtml(x.server_name || x.server_ip || '')} · ${escHtml(x.role_name || x.role_id || '')}`;
+    return `<div style="border:1px solid var(--border); border-radius:6px; padding:6px; margin-bottom:6px;">
+      <div style="font-size:12px; margin-bottom:6px;">${line}</div>
+      <div class="battle-row">
+        <button class="btn btn-primary btn-sm" onclick="quickLoginRun('${id}')">登录</button>
+        <button class="btn btn-danger btn-sm" onclick="quickLoginDelete('${id}')">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function quickLoginRun(id) {
+  const res = await api('GET', '/api/quick-logins').catch(() => null);
+  if (!res || !res.ok) return;
+  const item = (res.items || []).find(x => x.id === id);
+  if (!item) return;
+  startSSE();
+  lastConnectInfo = {
+    account: item.account || '',
+    password: item.password || '',
+    loginServer: item.login_server || '',
+    serverIp: item.server_ip || '',
+    serverPort: Number(item.server_port || 0),
+    serverName: item.server_name || '',
+    roleId: item.role_id || '',
+  };
+  const flow = await performLoginFlow(lastConnectInfo);
+  if (flow.ok) {
+    localStorage.setItem('lastConnectInfo', JSON.stringify(lastConnectInfo));
+    document.getElementById('login-panel').style.display = 'none';
+    document.getElementById('server-panel').style.display = 'none';
+    document.getElementById('role-panel').style.display = 'none';
+  } else {
+    showMsg('login-msg', `一键登录失败: ${flow.error || '未知错误'}`, 'err');
+  }
+}
+
+async function quickLoginDelete(id) {
+  await api('DELETE', `/api/quick-logins/${encodeURIComponent(id)}`).catch(() => null);
+  loadQuickLogins();
+}
+
 async function doLogin() {
   const account = document.getElementById('inp-account').value.trim();
   const password = document.getElementById('inp-password').value.trim();
@@ -740,6 +910,7 @@ async function enterGame() {
     lastConnectInfo.roleId = selectedRoleId;
     // 持久化到 localStorage，供页面刷新后自动重连使用
     localStorage.setItem('lastConnectInfo', JSON.stringify(lastConnectInfo));
+    await saveQuickLoginEntry(res.role || null);
     // 进游戏成功：隐藏角色面板，顶栏已显示角色信息
     document.getElementById('role-panel').style.display = 'none';
   } else {
@@ -796,19 +967,8 @@ async function autoReconnect() {
   document.getElementById('reconnect-info').textContent = `重连中…(${reconnectAttempts})`;
   document.getElementById('status-text').textContent = '重连中…';
   try {
-    // Step 1: 登录
-    const loginRes = await api('POST', '/api/login', {
-      account: info.account, password: info.password, server: info.loginServer
-    });
-    if (!loginRes.ok) { scheduleReconnect(); return; }
-    // Step 2: 连接游戏服获取角色
-    const rolesRes = await api('POST', '/api/roles', {
-      server_ip: info.serverIp, server_port: info.serverPort
-    });
-    if (!rolesRes.ok) { scheduleReconnect(); return; }
-    // Step 3: 选角进入游戏
-    const enterRes = await api('POST', '/api/select-role', { role_id: info.roleId });
-    if (!enterRes.ok) { scheduleReconnect(); return; }
+    const flow = await performLoginFlow(info);
+    if (!flow.ok) { scheduleReconnect(); return; }
     // 成功：updateStatus 会处理 UI 更新
     document.getElementById('reconnect-info').textContent = '重连成功';
     setTimeout(() => { document.getElementById('reconnect-info').textContent = ''; }, 2000);
@@ -920,6 +1080,378 @@ async function sendChat() {
   } else {
     appendChatLine(`发送失败: ${res.error}`, 'chat-msg-system');
   }
+}
+
+// ================================================================== //
+//  战斗                                                                //
+// ================================================================== //
+async function loadMonsters() {
+  const res = await api('GET', '/api/battle/monsters').catch(() => null);
+  if (res && res.ok) renderMonsterList(res.monsters || []);
+}
+
+function renderMonsterList(monsters) {
+  battleMonsters = Array.isArray(monsters) ? monsters : [];
+  const box = document.getElementById('battle-monster-list');
+  box.innerHTML = '';
+  if (!battleMonsters.length) {
+    box.innerHTML = '<div class="text-muted text-sm">暂无怪物，请先新增</div>';
+    selectedMonsterCode = '';
+    updateCurrentMonster();
+    return;
+  }
+  battleMonsters.forEach(m => {
+    const row = document.createElement('div');
+    row.className = 'monster-row' + (selectedMonsterCode === m.code ? ' selected' : '');
+    row.innerHTML = `
+      <span>${escHtml(m.name || '')}</span>
+      <span class="monster-code">${escHtml((m.code || '').toLowerCase())}</span>
+      <span class="battle-row">
+        <button class="btn btn-ghost btn-sm" onclick="selectMonster('${escAttr((m.code || '').toLowerCase())}')">选择</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteMonster('${escAttr((m.code || '').toLowerCase())}')">删除</button>
+      </span>`;
+    box.appendChild(row);
+  });
+  if (!selectedMonsterCode && battleMonsters.length) {
+    selectedMonsterCode = (battleMonsters[0].code || '').toLowerCase();
+  }
+  updateCurrentMonster();
+}
+
+function selectMonster(code) {
+  selectedMonsterCode = (code || '').toLowerCase();
+  renderMonsterList(battleMonsters);
+}
+
+async function addMonster() {
+  const name = document.getElementById('battle-monster-name').value.trim();
+  const code = document.getElementById('battle-monster-code').value.trim().toLowerCase();
+  if (!name || code.length !== 4) return;
+  const res = await api('POST', '/api/battle/monsters', { name, code });
+  if (res.ok) {
+    selectedMonsterCode = code;
+    renderMonsterList(res.monsters || []);
+    document.getElementById('battle-monster-name').value = '';
+    document.getElementById('battle-monster-code').value = '';
+  }
+}
+
+async function deleteMonster(code) {
+  const res = await api('DELETE', `/api/battle/monsters/${encodeURIComponent(code)}`);
+  if (res.ok) {
+    if (selectedMonsterCode === code) selectedMonsterCode = '';
+    renderMonsterList(res.monsters || []);
+  }
+}
+
+function updateCurrentMonster() {
+  const cur = battleMonsters.find(x => (x.code || '').toLowerCase() === selectedMonsterCode);
+  document.getElementById('battle-current-monster').textContent = cur ? `${cur.name} (${cur.code})` : '未选择';
+}
+
+function appendBattleLog(data, kind) {
+  const box = document.getElementById('battle-log');
+  const line = document.createElement('div');
+  line.className = 'battle-log-item' + (kind === 'end' ? ' end' : '');
+  if (kind === 'packet') line.dataset.kind = 'packet';
+  else line.dataset.kind = 'result';
+  const text = (data && data.raw_text) ? data.raw_text : JSON.stringify(data || {});
+  line.textContent = text || '(空)';
+  if (battleLogMode === 'simple' && line.dataset.kind === 'packet') {
+    line.style.display = 'none';
+  }
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendBattlePacketLine(record) {
+  const fp = (record.fingerprint || '').toLowerCase();
+  const watch = ['e8030500f603', 'e8030500f703', 'e8030100de07', 'e8030100df07'];
+  if (!watch.includes(fp)) return;
+  if (battleLogMode !== 'detail') return;
+  appendBattleLog({
+    raw_text: `[${record.direction}] ${fp} ${record.raw_hex || ''}`.trim(),
+  }, 'packet');
+}
+
+async function onBattleResponse(data) {
+  if (battleLogMode === 'detail') appendBattleLog(data, 'response');
+  const rawText = String(data?.raw_text || '');
+  if (rawText.includes('战斗已结束') || rawText.includes('e68898e69697e5b7b2e7bb93e69d9f')) {
+    appendBattleLog({ raw_text: '检测到“战斗已结束”，停止发送 f703，改为重发 f603' }, 'response');
+    await restartBattleByF603('战斗已结束，重发 f603 失败');
+    return;
+  }
+  // 已收到 de07，停止超时重试
+  if (de07WatchTimer) {
+    clearTimeout(de07WatchTimer);
+    de07WatchTimer = null;
+  }
+  de07RetryCount = 0;
+  // 第二步：收到 de07 后才发送 f703
+  if (battleAwaiting !== 'waiting_de07' || battleNextPending) return;
+  await sendBattleDoWithDelay();
+}
+
+function onBattleEnd(data) {
+  // 战斗结束时不输出原始转译内容，只输出结果摘要
+  if (f703WatchTimer) { clearTimeout(f703WatchTimer); f703WatchTimer = null; }
+  if (data?.no_energy) {
+    appendBattleLog({ raw_text: '内力不足' }, 'end');
+    stopBattleLoopWithReason('内力不足，已停止循环');
+    return;
+  }
+  const hasExpFromBackend = typeof data?.exp === 'number';
+  const hasGoldFromBackend = typeof data?.gold === 'number';
+  if (hasExpFromBackend) totalBattleExp += data.exp;
+  if (hasGoldFromBackend) totalBattleGoldCopper += data.gold;
+  // 兜底：后端未提取到数值时，前端再从文本提取一次（支持金银铜）
+  if (data?.raw_text && (!hasExpFromBackend || !hasGoldFromBackend)) {
+    const t = String(data.raw_text);
+    if (!hasExpFromBackend) {
+      const em = t.match(/(?:获得)?经验[：:+\s]*([0-9]+)/);
+      if (em) totalBattleExp += Number(em[1] || 0);
+    }
+    if (!hasGoldFromBackend) {
+      const gm = parseGoldToCopperFromText(t);
+      if (gm !== null) totalBattleGoldCopper += gm;
+    }
+  }
+  battleCount += 1;
+  const resultGold = formatGoldFromCopper(
+    (typeof data?.gold === 'number') ? data.gold : (parseGoldToCopperFromText(String(data?.raw_text || '')) || 0)
+  );
+  const resultExp = (typeof data?.exp === 'number')
+    ? data.exp
+    : Number((String(data?.raw_text || '').match(/(?:获得)?经验[：:+\s]*([0-9]+)/)?.[1] || 0));
+  appendBattleLog({
+    raw_text: `第${battleCount}次 / 本次获得经验${resultExp} / 获得金币${resultGold}`
+  }, 'end');
+  updateBattleStatsText();
+  battleNextPending = false;
+  battleAwaiting = 'idle';
+  if (battleLoopRunning) {
+    battleRoundIndex += 1;
+    const waitMs = battleRoundIndex >= 1 ? getBattleLoopDelayMs() : 0;
+    setTimeout(() => {
+      if (battleLoopRunning && !battleNextPending) triggerBattleOnce();
+    }, waitMs);
+  }
+}
+
+async function onBattleNotKilled(data) {
+  if (battleLogMode === 'detail') appendBattleLog(data, 'response');
+  const rawText = String(data?.raw_text || '');
+  if (rawText.includes('战斗已结束') || rawText.includes('e68898e69697e5b7b2e7bb93e69d9f')) {
+    appendBattleLog({ raw_text: '检测到“战斗已结束”，停止发送 f703，改为重发 f603' }, 'response');
+    await restartBattleByF603('战斗已结束，重发 f603 失败');
+    return;
+  }
+  // 仅在等待战斗结果时，判定未秒杀后继续发 f703
+  if (battleAwaiting !== 'waiting_result' || battleNextPending) return;
+  await sendBattleDoWithDelay();
+}
+
+function updateBattleStatsText() {
+  const g = formatGoldFromCopper(totalBattleGoldCopper);
+  document.getElementById('battle-stats').textContent =
+    `总战斗次数: ${battleCount} / 总获得经验: ${totalBattleExp} / 总获得金币: ${g}`;
+}
+
+function parseGoldToCopperFromText(text) {
+  // 支持：17铜 / 2银 / 1金2银3铜
+  const match = String(text).match(/(?:获得)?金币[：:]\s*([0-9]+金)?\s*([0-9]+银)?\s*([0-9]+铜)?/);
+  if (!match) return null;
+  const getNum = (s) => {
+    const m = (s || '').match(/([0-9]+)/);
+    return m ? Number(m[1]) : 0;
+  };
+  const jin = getNum(match[1]);
+  const yin = getNum(match[2]);
+  const tong = getNum(match[3]);
+  if (!match[1] && !match[2] && !match[3]) return null;
+  return jin * 1000 * 1000 + yin * 1000 + tong;
+}
+
+function formatGoldFromCopper(copper) {
+  const total = Math.max(0, Number(copper) || 0);
+  const jin = Math.floor(total / 1000000);
+  const rem1 = total % 1000000;
+  const yin = Math.floor(rem1 / 1000);
+  const tong = rem1 % 1000;
+  return `${tong}金${yin}银${jin}铜`;
+}
+
+async function triggerBattleOnce() {
+  if (!selectedMonsterCode || battleNextPending || battleAwaiting !== 'idle') return;
+  appendBattleLog({ raw_text: '战斗开始' }, 'response');
+  battleNextPending = true;
+  // 第一步：仅发起战斗 f603，收到 de07 后才发 f703
+  const res = await api('POST', '/api/battle/start', { monster_code: selectedMonsterCode });
+  if (!res.ok) {
+    battleNextPending = false;
+    battleAwaiting = 'idle';
+    appendBattleLog({ raw_text: `发送失败: ${res.error || '未知错误'}` }, 'end');
+    return;
+  }
+  battleNextPending = false;
+  battleAwaiting = 'waiting_de07';
+  startDe07Watch();
+}
+
+function toggleBattleLoop() {
+  battleLoopRunning = !battleLoopRunning;
+  const btn = document.getElementById('btn-battle-loop');
+  if (battleLoopRunning) {
+    // 新一轮循环战斗前重置累计
+    battleCount = 0;
+    totalBattleExp = 0;
+    totalBattleGoldCopper = 0;
+    battleRoundIndex = 0;
+    de07RetryCount = 0;
+    if (de07WatchTimer) { clearTimeout(de07WatchTimer); de07WatchTimer = null; }
+    if (f703WatchTimer) { clearTimeout(f703WatchTimer); f703WatchTimer = null; }
+    updateBattleStatsText();
+    btn.textContent = '停止循环战斗';
+    btn.classList.remove('btn-success');
+    btn.classList.add('btn-danger');
+    if (!battleNextPending) triggerBattleOnce();
+  } else {
+    if (de07WatchTimer) { clearTimeout(de07WatchTimer); de07WatchTimer = null; }
+    if (f703WatchTimer) { clearTimeout(f703WatchTimer); f703WatchTimer = null; }
+    de07RetryCount = 0;
+    battleNextPending = false;
+    battleAwaiting = 'idle';
+    btn.textContent = '开始循环战斗';
+    btn.classList.remove('btn-danger');
+    btn.classList.add('btn-success');
+  }
+}
+
+function getBattleLoopDelayMs() {
+  const el = document.getElementById('battle-loop-delay');
+  const n = Number((el?.value || '1900').trim());
+  if (!Number.isFinite(n) || n < 0) return 1900;
+  return Math.floor(n);
+}
+
+function stopBattleLoopWithReason(reason) {
+  battleLoopRunning = false;
+  battleNextPending = false;
+  battleAwaiting = 'idle';
+  if (de07WatchTimer) { clearTimeout(de07WatchTimer); de07WatchTimer = null; }
+  if (f703WatchTimer) { clearTimeout(f703WatchTimer); f703WatchTimer = null; }
+  de07RetryCount = 0;
+  const btn = document.getElementById('btn-battle-loop');
+  if (btn) {
+    btn.textContent = '开始循环战斗';
+    btn.classList.remove('btn-danger');
+    btn.classList.add('btn-success');
+  }
+  if (reason) appendBattleLog({ raw_text: reason }, 'end');
+}
+
+async function attemptBattleRecovery(reasonText) {
+  if (battleRecoveryInProgress) return;
+  battleRecoveryInProgress = true;
+  appendBattleLog({ raw_text: `${reasonText}，开始自动重登(登录-选区-选角)...` }, 'end');
+  try {
+    const info = lastConnectInfo || {};
+    if (!info.account || !info.password || !info.serverIp || !info.serverPort || !info.roleId) {
+      stopBattleLoopWithReason('自动重登失败：缺少登录上下文');
+      return;
+    }
+    const flow = await performLoginFlow(info);
+    if (!flow.ok) {
+      stopBattleLoopWithReason(`自动重登失败：${flow.error || '未知错误'}`);
+      return;
+    }
+    appendBattleLog({ raw_text: '自动重登成功，继续战斗。' }, 'response');
+    battleAwaiting = 'idle';
+    battleNextPending = false;
+    de07RetryCount = 0;
+    if (battleLoopRunning) {
+      setTimeout(() => {
+        if (battleLoopRunning && !battleNextPending && battleAwaiting === 'idle') triggerBattleOnce();
+      }, 300);
+    }
+  } catch (e) {
+    stopBattleLoopWithReason(`自动重登异常：${e?.message || e}`);
+  } finally {
+    battleRecoveryInProgress = false;
+  }
+}
+
+function startF703Watch() {
+  if (f703WatchTimer) clearTimeout(f703WatchTimer);
+  f703WatchTimer = setTimeout(async () => {
+    f703WatchTimer = null;
+    if (battleAwaiting !== 'waiting_result') return;
+    appendBattleLog({ raw_text: '等待 f703 响应超时，改为重发 f603...' }, 'response');
+    await restartBattleByF603('重发 f603 失败');
+  }, 2000);
+}
+
+async function sendBattleDoWithDelay() {
+  if (battleNextPending) return;
+  battleNextPending = true;
+  const delayMs = 500;
+  await new Promise(resolve => setTimeout(resolve, delayMs));
+  const res = await api('POST', '/api/battle/do');
+  battleNextPending = false;
+  if (res.ok) {
+    battleAwaiting = 'waiting_result';
+    startF703Watch();
+  } else {
+    appendBattleLog({ raw_text: `发送 f703 失败: ${res.error || '未知错误'}` }, 'end');
+    await restartBattleByF603('f703 失败后重发 f603 失败');
+  }
+}
+
+function startDe07Watch() {
+  if (de07WatchTimer) clearTimeout(de07WatchTimer);
+  de07WatchTimer = setTimeout(async () => {
+    de07WatchTimer = null;
+    // 仅在仍等待 de07 时处理
+    if (battleAwaiting !== 'waiting_de07') return;
+    if (battleLoopRunning) {
+      await attemptBattleRecovery('等待 de07 超时：f603 失败，开始重登');
+    } else {
+      stopBattleLoopWithReason('等待 de07 超时：本次单次战斗已停止');
+    }
+  }, 2000);
+}
+
+async function restartBattleByF603(errorPrefix) {
+  battleAwaiting = 'idle';
+  battleNextPending = false;
+  de07RetryCount = 0;
+  const startRes = await api('POST', '/api/battle/start', { monster_code: selectedMonsterCode });
+  if (!startRes.ok) {
+    if (battleLoopRunning) {
+      await attemptBattleRecovery(`${errorPrefix}：${startRes.error || '未知错误'}`);
+    } else {
+      stopBattleLoopWithReason(`${errorPrefix}：${startRes.error || '未知错误'}`);
+    }
+    return false;
+  }
+  battleAwaiting = 'waiting_de07';
+  startDe07Watch();
+  return true;
+}
+
+function clearBattleLog() {
+  document.getElementById('battle-log').innerHTML = '';
+}
+
+function onBattleLogModeChange() {
+  const modeEl = document.getElementById('battle-log-mode');
+  battleLogMode = (modeEl?.value === 'detail') ? 'detail' : 'simple';
+  const box = document.getElementById('battle-log');
+  if (!box) return;
+  box.querySelectorAll('.battle-log-item[data-kind="packet"]').forEach((el) => {
+    el.style.display = (battleLogMode === 'detail') ? '' : 'none';
+  });
 }
 
 // SSE 收到世界频道消息
@@ -1347,6 +1879,9 @@ function toggleCollapseMode() {
       showServerPanel('', []);
     }
   }
+  loadMonsters();
+  loadQuickLogins();
+  updateBattleStatsText();
 })();
 </script>
 </body>
