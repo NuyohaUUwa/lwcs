@@ -1,0 +1,1353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>游戏测试工具</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222638;
+    --border: #2e3350;
+    --accent: #5b7cf6;
+    --accent2: #7c5bf6;
+    --green: #3ecf8e;
+    --red: #f66b5b;
+    --yellow: #f6c05b;
+    --text: #e2e4f0;
+    --text2: #8b90a8;
+    --radius: 8px;
+    --font: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; line-height: 1.5; }
+
+  /* ---- 顶栏 ---- */
+  #topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  #topbar h1 { font-size: 15px; font-weight: 600; color: var(--accent); flex-shrink: 0; }
+  #status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); flex-shrink: 0; }
+  #status-dot.connected { background: var(--green); }
+  #status-dot.stale { background: var(--yellow); animation: pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  #status-text { color: var(--text2); font-size: 12px; }
+  #role-badge {
+    margin-left: auto; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 20px; padding: 2px 12px; font-size: 12px; color: var(--text);
+  }
+  #btn-disconnect {
+    margin-left: 8px; padding: 4px 12px; border-radius: 6px;
+    background: transparent; border: 1px solid var(--red); color: var(--red);
+    cursor: pointer; font-size: 12px; display: none;
+  }
+  #btn-disconnect:hover { background: var(--red); color: #fff; }
+  #reconnect-info { font-size: 11px; color: var(--yellow); }
+  #auto-reconnect-wrap {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 12px; color: var(--text2); cursor: pointer; user-select: none;
+  }
+  #auto-reconnect-wrap input { cursor: pointer; }
+
+  /* ---- 主布局 ---- */
+  #layout { display: grid; grid-template-columns: 320px 1fr; gap: 12px; padding: 12px; min-height: calc(100vh - 45px); }
+
+  /* ---- 面板通用 ---- */
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden; display: flex; flex-direction: column;
+  }
+  .panel-title {
+    padding: 8px 14px; background: var(--surface2); border-bottom: 1px solid var(--border);
+    font-weight: 600; font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .panel-title span.badge {
+    background: var(--accent); color: #fff; border-radius: 10px;
+    padding: 0 7px; font-size: 11px; font-weight: 700; margin-left: auto;
+  }
+  .panel-body { padding: 12px; flex: 1; overflow-y: auto; }
+
+  /* ---- Tab 导航 ---- */
+  #tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface2); }
+  .tab-btn {
+    padding: 8px 16px; background: none; border: none; color: var(--text2);
+    cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: 0.3px;
+    border-bottom: 2px solid transparent; transition: all 0.15s;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+  .tab-content.active { display: flex; }
+
+  /* ---- 表单 ---- */
+  .form-group { margin-bottom: 10px; }
+  .form-group label { display: block; color: var(--text2); font-size: 11px; margin-bottom: 4px; }
+  input[type=text], input[type=password], select, textarea {
+    width: 100%; padding: 7px 10px; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-size: 13px; font-family: var(--font);
+    outline: none; transition: border-color 0.15s;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 60px; }
+
+  /* ---- 按钮 ---- */
+  .btn {
+    padding: 7px 16px; border-radius: 6px; border: none; cursor: pointer;
+    font-size: 13px; font-family: var(--font); font-weight: 500;
+    transition: opacity 0.15s, transform 0.1s;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { opacity: 0.88; }
+  .btn-success { background: var(--green); color: #000; }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-warn { background: var(--yellow); color: #000; }
+  .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn-full { width: 100%; }
+
+  /* ---- 提示/消息 ---- */
+  .msg { padding: 7px 10px; border-radius: 6px; font-size: 12px; margin-top: 6px; }
+  .msg-ok { background: #1a3a2a; color: var(--green); border: 1px solid #2a5a3a; }
+  .msg-err { background: #3a1a1a; color: var(--red); border: 1px solid #5a2a2a; }
+  .msg-info { background: var(--surface2); color: var(--text2); border: 1px solid var(--border); }
+
+  /* ---- 角色卡片 ---- */
+  .role-card {
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 8px; cursor: pointer; transition: border-color 0.15s, background 0.15s;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .role-card:hover { border-color: var(--accent); background: var(--surface2); }
+  .role-card.selected { border-color: var(--accent); background: #1a2048; }
+  .role-avatar {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: var(--accent2); display: flex; align-items: center; justify-content: center;
+    font-size: 16px; flex-shrink: 0;
+  }
+  .role-name { font-weight: 600; font-size: 13px; }
+  .role-job { color: var(--text2); font-size: 11px; margin-top: 2px; }
+
+  /* ---- 背包 ---- */
+  #backpack-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px;
+  }
+  .item-card {
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+    cursor: pointer; transition: border-color 0.15s, background 0.15s;
+    position: relative;
+  }
+  .item-card:hover { border-color: var(--accent); }
+  .item-card.selected { border-color: var(--accent); background: #1a2048; }
+  .item-card.can-decompose { border-left: 3px solid var(--yellow); }
+  .item-name { font-size: 12px; font-weight: 500; word-break: break-all; }
+  .item-qty { color: var(--text2); font-size: 11px; margin-top: 3px; }
+  .item-id { color: #444; font-size: 10px; font-family: monospace; margin-top: 2px; }
+  #backpack-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+
+  /* ---- 聊天 ---- */
+  #chat-log {
+    flex: 1; overflow-y: auto; padding: 8px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; min-height: 200px;
+    font-size: 12px; line-height: 1.6;
+  }
+  .chat-msg-world { color: #ff8080; }
+  .chat-msg-system { color: #80b4ff; }
+  .chat-msg-self { color: var(--green); }
+  .chat-msg-system-announce { color: var(--yellow); }
+  #chat-input-row { display: flex; gap: 8px; margin-top: 8px; }
+  #chat-input { flex: 1; }
+
+  /* ---- 报文探测面板 ---- */
+  #probe-panel { display: flex; flex-direction: column; gap: 8px; height: 100%; }
+  #probe-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #probe-filters label { color: var(--text2); font-size: 11px; }
+  #probe-filters select, #probe-filters input { width: auto; padding: 4px 8px; font-size: 12px; }
+  #packet-list { flex: 1; overflow-y: auto; min-height: 0; }
+  .packet-row {
+    border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px;
+    overflow: hidden; transition: border-color 0.15s;
+  }
+  .packet-row:hover { border-color: var(--accent); }
+  .packet-header {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    background: var(--surface2); cursor: pointer; user-select: none;
+  }
+  .dir-badge {
+    padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 700; flex-shrink: 0;
+  }
+  .dir-UP { background: #1a3a5a; color: #5bbeff; }
+  .dir-DN { background: #1a3a2a; color: var(--green); }
+  .pkt-time { color: var(--text2); font-size: 11px; flex-shrink: 0; }
+  .pkt-fp { font-family: monospace; font-size: 11px; color: var(--text2); flex-shrink: 0; }
+  .pkt-type { font-size: 11px; color: var(--accent); flex-shrink: 0; }
+  .pkt-annotation { font-size: 11px; color: var(--yellow); }
+  .parse-badge { margin-left: auto; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .parse-badge.known { background: #1a3a2a; color: var(--green); }
+  .parse-badge.generic { background: #1a2a3a; color: #5bbeff; }
+  .parse-badge.unknown { background: #3a1a1a; color: var(--red); }
+  .pkt-raw-hex-wrapper { position: relative; margin-bottom: 8px; }
+  .pkt-copy-btn {
+    position: absolute; top: 4px; right: 4px;
+    padding: 2px 8px; font-size: 10px; border-radius: 4px;
+    background: var(--surface); border: 1px solid var(--border); color: var(--text2);
+    cursor: pointer; opacity: 0.7; transition: all 0.15s;
+  }
+  .pkt-copy-btn:hover { opacity: 1; color: var(--accent); border-color: var(--accent); }
+  .pkt-detail {
+    display: none; padding: 10px; border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .pkt-detail.open { display: block; }
+  .pkt-raw-hex {
+    font-family: monospace; font-size: 11px; color: var(--text2);
+    word-break: break-all; background: var(--surface2);
+    padding: 6px 42px 6px 6px; border-radius: 4px;
+    max-height: 100px; overflow-y: auto;
+  }
+  .pkt-utf8 {
+    font-size: 12px; color: var(--text); background: var(--surface2);
+    padding: 6px; border-radius: 4px; margin-bottom: 8px;
+    word-break: break-word; max-height: 80px; overflow-y: auto;
+  }
+  .pkt-utf8 .cn-text { color: #ffd77a; }
+  .pkt-fields { font-size: 11px; color: var(--text2); margin-bottom: 8px; }
+  .pkt-fields span { color: var(--text); }
+  .annotation-row { display: flex; gap: 6px; margin-top: 6px; }
+  .annotation-row input { flex: 1; padding: 4px 8px; font-size: 12px; }
+  .annotation-row button { padding: 4px 10px; font-size: 12px; }
+
+  /* ---- 自定义发包 ---- */
+  #custom-send-panel {
+    border: 1px solid var(--border); border-radius: 6px; padding: 10px;
+    background: var(--surface2);
+  }
+  #custom-send-panel h3 { font-size: 12px; color: var(--text2); margin-bottom: 8px; }
+  #custom-hex { font-family: monospace; font-size: 12px; }
+  #custom-send-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  #custom-send-result { font-size: 12px; margin-top: 6px; }
+
+  /* ---- 公告 ---- */
+  #announcement-box {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; font-size: 12px; color: var(--text2); max-height: 120px; overflow-y: auto;
+    white-space: pre-wrap; line-height: 1.7;
+  }
+
+  /* ---- 服务器列表 ---- */
+  .server-item {
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 6px; cursor: pointer; transition: border-color 0.15s, background 0.15s;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .server-item:hover { border-color: var(--accent); background: var(--surface2); }
+  .server-item.selected { border-color: var(--accent); background: #1a2048; }
+  .server-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+  .server-name { font-weight: 500; }
+  .server-addr { color: var(--text2); font-size: 11px; margin-left: auto; }
+
+  /* ---- 滚动条 ---- */
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+  /* ---- 角色属性面板 ---- */
+  #role-stats-panel { display: none; }
+  #role-stats-panel.visible { display: block; }
+  .stats-group { margin-bottom: 10px; }
+  .stats-group-title {
+    font-size: 10px; font-weight: 600; color: var(--text2); text-transform: uppercase;
+    letter-spacing: 0.5px; margin-bottom: 5px; border-bottom: 1px solid var(--border);
+    padding-bottom: 3px;
+  }
+  .stats-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 3px 6px;
+  }
+  .stat-row { display: flex; justify-content: space-between; align-items: center; font-size: 11px; }
+  .stat-name { color: var(--text2); }
+  .stat-value { color: var(--text); font-weight: 500; font-family: monospace; font-size: 11px; }
+  .stat-value.highlight { color: var(--accent); }
+
+  /* ---- 折叠徽章 ---- */
+  .pkt-collapse-count {
+    font-size: 10px; background: var(--accent2); color: #fff;
+    border-radius: 10px; padding: 1px 7px; font-weight: 700; flex-shrink: 0;
+  }
+  #btn-collapse-mode {
+    padding: 4px 10px; border-radius: 6px; font-size: 12px; border: 1px solid var(--border);
+    background: var(--surface2); color: var(--text2); cursor: pointer; transition: all 0.15s;
+  }
+  #btn-collapse-mode.active { border-color: var(--accent2); color: var(--accent2); background: #1a1030; }
+
+  /* ---- 工具类 ---- */
+  .flex-row { display: flex; gap: 8px; align-items: center; }
+  .mt-8 { margin-top: 8px; }
+  .text-sm { font-size: 11px; }
+  .text-muted { color: var(--text2); }
+  .text-green { color: var(--green); }
+  .text-red { color: var(--red); }
+  .text-yellow { color: var(--yellow); }
+  .hidden { display: none !important; }
+  .separator { height: 1px; background: var(--border); margin: 10px 0; }
+  .mono { font-family: monospace; }
+
+  @media (max-width: 900px) {
+    #layout { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ====== 顶栏 ====== -->
+<div id="topbar">
+  <h1>⚔ 游戏测试工具</h1>
+  <div id="status-dot"></div>
+  <span id="status-text">未连接</span>
+  <span id="reconnect-info"></span>
+  <span id="role-badge">—</span>
+  <label id="auto-reconnect-wrap" title="断线后自动重新登录并选角">
+    <input type="checkbox" id="chk-auto-reconnect"> 自动重连
+  </label>
+  <button id="btn-disconnect" onclick="disconnect()">断开</button>
+</div>
+
+<!-- ====== 主布局 ====== -->
+<div id="layout">
+
+  <!-- ====== 左侧面板 ====== -->
+  <div style="display:flex; flex-direction:column; gap:12px;">
+
+    <!-- 登录面板 -->
+    <div class="panel" id="login-panel">
+      <div class="panel-title">🔐 登录</div>
+      <div class="panel-body">
+        <div class="form-group">
+          <label>账号</label>
+          <input type="text" id="inp-account" placeholder="游戏账号（ASCII）">
+        </div>
+        <div class="form-group">
+          <label>密码</label>
+          <input type="password" id="inp-password" placeholder="游戏密码（ASCII）">
+        </div>
+        <div class="form-group">
+          <label>登录服务器</label>
+          <select id="sel-login-server">
+            <option value="龙一服">龙一服</option>
+            <option value="龙二服">龙二服</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-full" id="btn-login" onclick="doLogin()">登录</button>
+        <div id="login-msg"></div>
+      </div>
+    </div>
+
+    <!-- 公告 + 游戏服选择 -->
+    <div class="panel" id="server-panel" style="display:none">
+      <div class="panel-title">📢 公告 & 服务器选择</div>
+      <div class="panel-body">
+        <div id="announcement-box" class="text-muted">暂无公告</div>
+        <div class="separator"></div>
+        <div style="font-size:11px; color:var(--text2); margin-bottom:8px;">选择游戏服务器：</div>
+        <div id="server-list"></div>
+        <button class="btn btn-primary btn-full mt-8" id="btn-fetch-roles" onclick="fetchRoles()" disabled>获取角色列表</button>
+        <div id="server-msg"></div>
+      </div>
+    </div>
+
+    <!-- 角色选择 -->
+    <div class="panel" id="role-panel" style="display:none">
+      <div class="panel-title">👤 角色选择</div>
+      <div class="panel-body">
+        <div id="role-list"></div>
+        <button class="btn btn-success btn-full mt-8" id="btn-enter" onclick="enterGame()" disabled>进入游戏</button>
+        <div id="role-msg"></div>
+      </div>
+    </div>
+
+    <!-- 角色属性面板（进游戏后显示） -->
+    <div class="panel" id="role-stats-panel">
+      <div class="panel-title" style="cursor:pointer; user-select:none;" onclick="toggleStatsPanel()">
+        📊 角色属性
+        <span id="stats-toggle-icon" style="float:right; font-size:11px; color:var(--text2);">▼</span>
+      </div>
+      <div class="panel-body" id="stats-body">
+        <div id="stats-content" style="font-size:12px; color:var(--text2);">等待数据...</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ====== 右侧面板（Tab） ====== -->
+  <div class="panel" style="min-height:500px;">
+    <div id="tabs">
+      <button class="tab-btn active" onclick="switchTab('probe')">🔍 报文探测</button>
+      <button class="tab-btn" onclick="switchTab('backpack')">🎒 背包</button>
+      <button class="tab-btn" onclick="switchTab('chat')">💬 聊天</button>
+    </div>
+
+    <!-- 背包 Tab -->
+    <div class="tab-content panel-body" id="tab-backpack">
+      <div id="backpack-actions">
+        <button class="btn btn-success btn-sm" onclick="useSelected()">使用</button>
+        <button class="btn btn-danger btn-sm" onclick="dropSelected()">丢弃</button>
+        <button class="btn btn-warn btn-sm" onclick="decomposeSelected()">分解</button>
+        <button class="btn btn-ghost btn-sm" onclick="decomposeAll()">一键分解</button>
+        <button class="btn btn-ghost btn-sm" onclick="exchangeWuling()">兑换五灵</button>
+        <button class="btn btn-ghost btn-sm" onclick="refreshBackpack()">刷新</button>
+        <span class="text-muted text-sm" id="backpack-count"></span>
+      </div>
+      <div id="backpack-grid"><div class="text-muted text-sm">背包为空或尚未进入游戏</div></div>
+      <div id="backpack-msg" class="mt-8"></div>
+    </div>
+
+    <!-- 聊天 Tab -->
+    <div class="tab-content panel-body" id="tab-chat" style="flex-direction:column; gap:8px;">
+      <div id="chat-log"></div>
+      <div id="chat-input-row">
+        <input type="text" id="chat-input" placeholder="输入消息（回车发送）" onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="btn btn-primary" onclick="sendChat()">发送</button>
+      </div>
+    </div>
+
+    <!-- 报文探测 Tab -->
+    <div class="tab-content active panel-body" id="tab-probe" style="flex-direction:column; gap:8px; padding:10px;">
+      <div id="probe-panel">
+
+        <!-- 自定义发包 -->
+        <div id="custom-send-panel">
+          <h3>⬆ 自定义发包（探索新功能）</h3>
+          <textarea id="custom-hex" rows="3" placeholder="输入 hex 字符串，如：1e000000e80308000404..."></textarea>
+          <div id="custom-send-row">
+            <label style="color:var(--text2); font-size:12px;">
+              <input type="checkbox" id="chk-use-queue" checked> 走发送队列（节流 0.6s）
+            </label>
+            <button class="btn btn-primary btn-sm" onclick="sendProbePacket()">发送</button>
+            <button class="btn btn-ghost btn-sm" onclick="parseProbeHex()">仅解析</button>
+          </div>
+          <div id="custom-send-result"></div>
+        </div>
+
+        <!-- 过滤栏 -->
+        <div id="probe-filters" style="flex-direction:column; align-items:stretch; gap:6px;">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <label>方向</label>
+            <select id="flt-dir" onchange="filterPackets()">
+              <option value="">全部</option>
+              <option value="UP">上行↑</option>
+              <option value="DN">下行↓</option>
+            </select>
+            <label>解析</label>
+            <select id="flt-parsed" onchange="filterPackets()">
+              <option value="">全部</option>
+              <option value="true">已解析</option>
+              <option value="false">未解析</option>
+            </select>
+            <label>指纹</label>
+            <select id="flt-annotated" onchange="filterPackets()">
+              <option value="">全部</option>
+              <option value="true">已有描述</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="loadPackets()">刷新</button>
+            <button class="btn btn-ghost btn-sm" onclick="clearPacketList()">清空显示</button>
+            <button id="btn-collapse-mode" onclick="toggleCollapseMode()" title="折叠相同指纹的报文，只显示最新一条及出现次数">折叠同类</button>
+            <span class="text-muted text-sm" id="pkt-count"></span>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <label style="flex-shrink:0;">搜索</label>
+            <input type="text" id="flt-search" placeholder="搜索 hex / 指纹描述 / UTF-8 内容…"
+              style="flex:1; padding:4px 8px; font-size:12px;" oninput="filterPackets()">
+            <label style="flex-shrink:0;">排除指纹</label>
+            <input type="text" id="flt-exclude-fp" placeholder="如：514f, ec07（逗号分隔）"
+              style="flex:1; padding:4px 8px; font-size:12px;" oninput="filterPackets()">
+          </div>
+        </div>
+
+        <!-- 报文列表 -->
+        <div id="packet-list" style="flex:1; overflow-y:auto; min-height:200px;"></div>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ================================================================== //
+//  全局状态                                                            //
+// ================================================================== //
+const API = '';  // 同域，空前缀
+let selectedServer = null;  // {name, ip, port}
+let selectedRoleId = null;
+let selectedItemId = null;
+let packetRows = [];         // 当前显示的报文行
+let eventSource = null;
+let isConnected = false;
+let prevConnected = false;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let lastConnectInfo = { account: '', password: '', loginServer: '', serverIp: '', serverPort: 0, serverName: '', roleId: '' };
+
+// ================================================================== //
+//  工具函数                                                            //
+// ================================================================== //
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(API + path, opts);
+  return r.json();
+}
+
+function showMsg(elId, text, type = 'info') {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.className = `msg msg-${type === 'ok' ? 'ok' : type === 'err' ? 'err' : 'info'}`;
+  el.textContent = text;
+}
+
+function clearMsg(elId) {
+  const el = document.getElementById(elId);
+  if (el) { el.className = ''; el.textContent = ''; }
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach((b, i) => {
+    const names = ['probe', 'backpack', 'chat'];
+    b.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(el => {
+    el.classList.toggle('active', el.id === 'tab-' + name);
+  });
+  if (name === 'probe') loadPackets();
+}
+
+// ================================================================== //
+//  SSE 实时连接                                                        //
+// ================================================================== //
+function startSSE() {
+  if (eventSource) { eventSource.close(); }
+  eventSource = new EventSource(API + '/api/events');
+  eventSource.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'status') updateStatus(msg.data);
+      else if (msg.type === 'backpack') renderBackpack(msg.data);
+      else if (msg.type === 'packet') appendPacketRow(msg.data);
+      else if (msg.type === 'annotation') updatePacketAnnotation(msg.data);
+      else if (msg.type === 'role_stats') renderRoleStats(msg.data);
+    } catch (_) {}
+  };
+  eventSource.onerror = () => {
+    setTimeout(startSSE, 3000);
+  };
+}
+
+// ================================================================== //
+//  状态更新                                                            //
+// ================================================================== //
+// 心跳状态轮询定时器
+let _heartbeatPollTimer = null;
+const STALE_WARN_S = 60;   // 距上次收包 > 60s 开始显示警告
+
+function updateStatus(data) {
+  const wasConnected = prevConnected;
+  isConnected = data.connected;
+  prevConnected = isConnected;
+  const dot = document.getElementById('status-dot');
+  const txt = document.getElementById('status-text');
+  const badge = document.getElementById('role-badge');
+  const btnDisc = document.getElementById('btn-disconnect');
+
+  if (isConnected) {
+    const r = data.role;
+    const age = data.last_recv_age;           // 距上次收包秒数
+    const stale = age !== null && age > STALE_WARN_S;
+    dot.className = stale ? 'stale' : 'connected';
+    if (stale) {
+      txt.textContent = `⚠ 心跳超时 ${Math.round(age)}s · ${data.server_name || ''}`;
+    } else {
+      txt.textContent = `已连接 · ${data.server_name || ''}`;
+    }
+    badge.textContent = r ? `${r.role_name} · ${r.role_job}` : '未选角';
+    btnDisc.style.display = 'inline-block';
+    document.getElementById('role-stats-panel').classList.add('visible');
+    // 重连成功：清除计时器
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    reconnectAttempts = 0;
+    document.getElementById('reconnect-info').textContent = '';
+    // 加载角色属性
+    api('GET', '/api/role-stats').then(r => { if (r.ok && r.stats) renderRoleStats(r); });
+    // 启动心跳轮询（已连接时每 20s 刷新一次状态以更新心跳年龄）
+    _startHeartbeatPoll();
+  } else {
+    _stopHeartbeatPoll();
+    dot.className = '';
+    if (data.connection_status !== 'got_session') {
+      badge.textContent = '—';
+      btnDisc.style.display = 'none';
+      renderBackpack([]);
+      document.getElementById('role-stats-panel').classList.remove('visible');
+      // 如果从已连接变成断线，且未主动断线，触发自动重连
+      if (wasConnected && document.getElementById('chk-auto-reconnect').checked && lastConnectInfo.roleId) {
+        txt.textContent = '连接断开';
+        scheduleReconnect();
+      } else if (!reconnectTimer) {
+        txt.textContent = '未连接';
+        document.getElementById('reconnect-info').textContent = '';
+      }
+    } else {
+      txt.textContent = '已登录，未选角';
+    }
+  }
+}
+
+function _startHeartbeatPoll() {
+  if (_heartbeatPollTimer) return;
+  // 每 5s 轮询一次（与后端心跳线程间隔对齐，确保 stale 警告能及时显示）
+  _heartbeatPollTimer = setInterval(async () => {
+    if (!isConnected) { _stopHeartbeatPoll(); return; }
+    try {
+      const status = await api('GET', '/api/status');
+      if (status) updateStatus(status);
+    } catch (_) {}
+  }, 5000);
+}
+
+function _stopHeartbeatPoll() {
+  if (_heartbeatPollTimer) { clearInterval(_heartbeatPollTimer); _heartbeatPollTimer = null; }
+}
+
+// ================================================================== //
+//  登录流程                                                            //
+// ================================================================== //
+async function doLogin() {
+  const account = document.getElementById('inp-account').value.trim();
+  const password = document.getElementById('inp-password').value.trim();
+  const server = document.getElementById('sel-login-server').value;
+  if (!account || !password) { showMsg('login-msg', '账号和密码不能为空', 'err'); return; }
+
+  document.getElementById('btn-login').disabled = true;
+  showMsg('login-msg', '登录中…', 'info');
+  const res = await api('POST', '/api/login', { account, password, server });
+  document.getElementById('btn-login').disabled = false;
+
+  if (res.ok) {
+    lastConnectInfo.account = account;
+    lastConnectInfo.password = password;
+    lastConnectInfo.loginServer = server;
+    showMsg('login-msg', '登录成功', 'ok');
+    startSSE();
+    // 短暂显示成功提示后隐藏登录面板，展示服务器选择
+    setTimeout(() => {
+      document.getElementById('login-panel').style.display = 'none';
+      showServerPanel(res.announcement, res.server_list);
+    }, 600);
+  } else {
+    showMsg('login-msg', res.error || '登录失败', 'err');
+  }
+}
+
+function showServerPanel(announcement, serverList) {
+  document.getElementById('server-panel').style.display = '';
+  // 公告
+  const ann = announcement || '暂无公告';
+  document.getElementById('announcement-box').textContent = ann;
+  // 服务器列表：优先使用从登录响应解析出的，否则用预设
+  const list = document.getElementById('server-list');
+  list.innerHTML = '';
+  const servers = serverList && serverList.length > 0 ? serverList : [];
+  // 追加预设服务器
+  const preset = [
+    { name: '龙一服', ip: 'tlz.shuihl.cn', port: 12065, id: 'preset' },
+    { name: '龙二服', ip: 'tl10.shuihl.cn', port: 12001, id: 'preset' },
+    { name: '生死符(推荐)', ip: 'tl11.shuihl.cn', port: 12001, id: 'preset' },
+  ];
+  const all = servers.length > 0 ? servers : preset;
+  all.forEach(srv => {
+    const d = document.createElement('div');
+    d.className = 'server-item';
+    d.innerHTML = `<div class="server-dot"></div>
+      <span class="server-name">${escHtml(srv.name)}</span>
+      <span class="server-addr">${escHtml(srv.ip)}:${srv.port}</span>`;
+    d.onclick = () => {
+      document.querySelectorAll('.server-item').forEach(x => x.classList.remove('selected'));
+      d.classList.add('selected');
+      selectedServer = srv;
+      document.getElementById('btn-fetch-roles').disabled = false;
+    };
+    list.appendChild(d);
+  });
+}
+
+async function fetchRoles() {
+  if (!selectedServer) { showMsg('server-msg', '请先选择服务器', 'err'); return; }
+  document.getElementById('btn-fetch-roles').disabled = true;
+  showMsg('server-msg', '连接游戏服，获取角色列表…', 'info');
+  const res = await api('POST', '/api/roles', { server_ip: selectedServer.ip, server_port: selectedServer.port });
+  document.getElementById('btn-fetch-roles').disabled = false;
+  if (res.ok) {
+    lastConnectInfo.serverIp = selectedServer.ip;
+    lastConnectInfo.serverPort = selectedServer.port;
+    lastConnectInfo.serverName = selectedServer.name;
+    clearMsg('server-msg');
+    renderRoleList(res.roles || []);
+    // 隐藏服务器面板，展示角色选择
+    document.getElementById('server-panel').style.display = 'none';
+    document.getElementById('role-panel').style.display = '';
+  } else {
+    showMsg('server-msg', res.error || '获取角色列表失败', 'err');
+  }
+}
+
+function renderRoleList(roles) {
+  const container = document.getElementById('role-list');
+  container.innerHTML = '';
+  if (!roles || roles.length === 0) {
+    container.innerHTML = '<div class="text-muted text-sm">未找到角色</div>';
+    return;
+  }
+  roles.forEach(r => {
+    const d = document.createElement('div');
+    d.className = 'role-card';
+    d.innerHTML = `<div class="role-avatar">🧙</div>
+      <div>
+        <div class="role-name">${escHtml(r.role_name)}</div>
+        <div class="role-job">${escHtml(r.role_job)} · ID: ${escHtml(r.role_id)}</div>
+      </div>`;
+    d.onclick = () => {
+      document.querySelectorAll('.role-card').forEach(x => x.classList.remove('selected'));
+      d.classList.add('selected');
+      selectedRoleId = r.role_id;
+      document.getElementById('btn-enter').disabled = false;
+    };
+    container.appendChild(d);
+  });
+}
+
+async function enterGame() {
+  if (!selectedRoleId) return;
+  document.getElementById('btn-enter').disabled = true;
+  showMsg('role-msg', '进入游戏中…', 'info');
+  const res = await api('POST', '/api/select-role', { role_id: selectedRoleId });
+  document.getElementById('btn-enter').disabled = false;
+  if (res.ok) {
+    lastConnectInfo.roleId = selectedRoleId;
+    // 持久化到 localStorage，供页面刷新后自动重连使用
+    localStorage.setItem('lastConnectInfo', JSON.stringify(lastConnectInfo));
+    // 进游戏成功：隐藏角色面板，顶栏已显示角色信息
+    document.getElementById('role-panel').style.display = 'none';
+  } else {
+    document.getElementById('btn-enter').disabled = false;
+    showMsg('role-msg', res.error || '进入游戏失败', 'err');
+  }
+}
+
+async function disconnect() {
+  // 主动断线：清空重连信息，防止自动重连
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectAttempts = 0;
+  lastConnectInfo.roleId = '';
+  localStorage.removeItem('lastConnectInfo');
+  document.getElementById('reconnect-info').textContent = '';
+  await api('POST', '/api/disconnect');
+  prevConnected = false;
+  resetToLoginState();
+}
+
+function resetToLoginState() {
+  isConnected = false;
+  _stopHeartbeatPoll();
+  selectedServer = null;
+  selectedRoleId = null;
+  selectedItemId = null;
+  document.getElementById('login-panel').style.display = '';
+  document.getElementById('server-panel').style.display = 'none';
+  document.getElementById('role-panel').style.display = 'none';
+  document.getElementById('btn-login').disabled = false;
+  document.getElementById('status-dot').className = '';
+  document.getElementById('status-text').textContent = '未连接';
+  document.getElementById('role-badge').textContent = '—';
+  document.getElementById('btn-disconnect').style.display = 'none';
+  document.getElementById('role-stats-panel').classList.remove('visible');
+  renderBackpack([]);
+}
+
+function scheduleReconnect() {
+  if (!document.getElementById('chk-auto-reconnect').checked) return;
+  if (reconnectTimer) return;
+  reconnectAttempts++;
+  const delay = Math.min(3000 * reconnectAttempts, 30000);
+  document.getElementById('reconnect-info').textContent = `${delay / 1000}s 后重连(${reconnectAttempts})…`;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    autoReconnect();
+  }, delay);
+}
+
+async function autoReconnect() {
+  const info = lastConnectInfo;
+  if (!info.account || !info.roleId) return;
+  document.getElementById('reconnect-info').textContent = `重连中…(${reconnectAttempts})`;
+  document.getElementById('status-text').textContent = '重连中…';
+  try {
+    // Step 1: 登录
+    const loginRes = await api('POST', '/api/login', {
+      account: info.account, password: info.password, server: info.loginServer
+    });
+    if (!loginRes.ok) { scheduleReconnect(); return; }
+    // Step 2: 连接游戏服获取角色
+    const rolesRes = await api('POST', '/api/roles', {
+      server_ip: info.serverIp, server_port: info.serverPort
+    });
+    if (!rolesRes.ok) { scheduleReconnect(); return; }
+    // Step 3: 选角进入游戏
+    const enterRes = await api('POST', '/api/select-role', { role_id: info.roleId });
+    if (!enterRes.ok) { scheduleReconnect(); return; }
+    // 成功：updateStatus 会处理 UI 更新
+    document.getElementById('reconnect-info').textContent = '重连成功';
+    setTimeout(() => { document.getElementById('reconnect-info').textContent = ''; }, 2000);
+  } catch (e) {
+    scheduleReconnect();
+  }
+}
+
+// ================================================================== //
+//  背包                                                                //
+// ================================================================== //
+async function refreshBackpack() {
+  // 对齐 main-000.py _refresh_backpack_manual：清空显示 → 拉取最新缓存 → 展示数量
+  const grid = document.getElementById('backpack-grid');
+  const countEl = document.getElementById('backpack-count');
+  const msgEl = document.getElementById('backpack-msg');
+  grid.innerHTML = '<div class="text-muted text-sm">刷新中…</div>';
+  countEl.textContent = '';
+
+  const res = await api('POST', '/api/backpack/refresh');
+  if (res.ok) {
+    renderBackpack(res.items || []);
+    showMsg('backpack-msg', `手动刷新完成，背包当前物品数量：${res.count} 件`, 'ok');
+  } else {
+    showMsg('backpack-msg', res.error || '刷新失败', 'err');
+  }
+}
+
+function renderBackpack(items) {
+  const grid = document.getElementById('backpack-grid');
+  document.getElementById('backpack-count').textContent = `共 ${items.length} 件`;
+  if (!items || items.length === 0) {
+    grid.innerHTML = '<div class="text-muted text-sm">背包为空</div>';
+    return;
+  }
+  grid.innerHTML = '';
+  items.forEach(item => {
+    const d = document.createElement('div');
+    d.className = 'item-card' + (item.can_disassemble ? ' can-decompose' : '');
+    if (item.item_id === selectedItemId) d.classList.add('selected');
+    d.innerHTML = `<div class="item-name">${escHtml(item.name)}</div>
+      <div class="item-qty">数量：${item.quantity}</div>
+      <div class="item-id mono">${item.item_id}</div>`;
+    d.onclick = () => {
+      document.querySelectorAll('.item-card').forEach(x => x.classList.remove('selected'));
+      d.classList.add('selected');
+      selectedItemId = item.item_id;
+    };
+    grid.appendChild(d);
+  });
+}
+
+async function useSelected() {
+  if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
+  const res = await api('POST', '/api/item/use', { item_id: selectedItemId, quantity: 1 });
+  showMsg('backpack-msg', res.ok ? `已加入发送队列 x${res.queued}` : res.error, res.ok ? 'ok' : 'err');
+}
+
+async function dropSelected() {
+  if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
+  const res = await api('POST', '/api/item/drop', { item_id: selectedItemId, quantity: 1 });
+  showMsg('backpack-msg', res.ok ? '丢弃请求已入队' : res.error, res.ok ? 'ok' : 'err');
+}
+
+async function decomposeSelected() {
+  if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
+  const res = await api('POST', '/api/item/decompose', { item_id: selectedItemId });
+  showMsg('backpack-msg', res.ok ? '分解请求已入队' : res.error, res.ok ? 'ok' : 'err');
+}
+
+async function decomposeAll() {
+  const role = document.getElementById('role-badge').textContent;
+  const jobMap = { '侠客': ['侠士战甲','侠士头盔'], '刺客': ['刺客战甲','刺客头盔'], '术士': ['术士战甲','术士头盔'] };
+  let protected_items = [];
+  for (const [job, items] of Object.entries(jobMap)) {
+    if (role.includes(job)) { protected_items = items; break; }
+  }
+  const res = await api('POST', '/api/item/decompose-all', { protected_items });
+  showMsg('backpack-msg',
+    res.ok ? `一键分解完成：已分解 ${res.queued?.length || 0} 件，跳过 ${res.skipped?.length || 0} 件` : res.error,
+    res.ok ? 'ok' : 'err');
+}
+
+async function exchangeWuling() {
+  const res = await api('POST', '/api/item/exchange-wuling');
+  showMsg('backpack-msg', res.ok ? '兑换五灵请求已入队' : res.error, res.ok ? 'ok' : 'err');
+}
+
+// ================================================================== //
+//  聊天                                                                //
+// ================================================================== //
+function appendChatLine(text, cls) {
+  const log = document.getElementById('chat-log');
+  const div = document.createElement('div');
+  div.className = cls || '';
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const message = input.value.trim();
+  if (!message) return;
+  const res = await api('POST', '/api/chat', { message });
+  if (res.ok) {
+    appendChatLine(`我: ${message}`, 'chat-msg-self');
+    input.value = '';
+  } else {
+    appendChatLine(`发送失败: ${res.error}`, 'chat-msg-system');
+  }
+}
+
+// SSE 收到世界频道消息
+function handleWorldChat(parsed) {
+  if (parsed && parsed.utf8_text) {
+    appendChatLine(parsed.utf8_text, 'chat-msg-world');
+  }
+}
+
+// ================================================================== //
+//  报文探测                                                            //
+// ================================================================== //
+const MAX_PACKET_ROWS = 200;  // 前端最多保留 200 条
+
+function appendPacketRow(record) {
+  if (document.getElementById('tab-probe').classList.contains('active')) {
+    if (!matchFilter(record)) return;
+    if (collapseMode) {
+      const fp = record.fingerprint || record.raw_hex.substring(0, 16);
+      fpCountMap[fp] = (fpCountMap[fp] || 0) + 1;
+      // 查找是否已有该指纹的行
+      const existing = document.getElementById(`pkt-fp-${CSS.escape(fp)}`);
+      if (existing) {
+        // 更新计数和内容
+        const countEl = existing.querySelector('.pkt-collapse-count');
+        if (countEl) countEl.textContent = `×${fpCountMap[fp]}`;
+        return;
+      }
+      prependRowToList(record, fpCountMap[fp]);
+    } else {
+      prependRowToList(record, 0);
+    }
+  }
+  // 若是世界频道消息，也转发到聊天
+  if (record.direction === 'DN' && record.parsed) {
+    const fp = record.fingerprint || '';
+    if (fp.includes('f207') || (record.parsed.type && record.parsed.type.includes('世界'))) {
+      handleWorldChat(record.parsed);
+    }
+  }
+}
+
+function hasChineseContent(text) {
+  if (!text) return false;
+  return /[\u4e00-\u9fa5]/.test(text);
+}
+
+
+function matchFilter(record) {
+  const dir = document.getElementById('flt-dir').value;
+  const parsed = document.getElementById('flt-parsed').value;
+  const annotated = document.getElementById('flt-annotated').value;
+  const search = (document.getElementById('flt-search')?.value || '').trim().toLowerCase();
+  const excludeFpRaw = (document.getElementById('flt-exclude-fp')?.value || '').trim().toLowerCase();
+
+  if (dir && record.direction !== dir) return false;
+
+  const isUnresolved = !record.parsed || (record.parsed.level === 'known' && !hasChineseContent(record.parsed?.utf8_text));
+  if (parsed === 'true' && isUnresolved) return false;
+  if (parsed === 'false' && !isUnresolved) return false;
+
+  if (annotated === 'true' && !record.annotation) return false;
+
+  // 排除指纹（逗号分隔，任一命中则排除）
+  if (excludeFpRaw) {
+    const excludeList = excludeFpRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const fp = (record.fingerprint || '').toLowerCase();
+    for (const ex of excludeList) {
+      if (fp.includes(ex)) return false;
+    }
+  }
+
+  // 关键词搜索（在 raw_hex / annotation / type / utf8_text / command_hex 中查找）
+  if (search) {
+    const p = record.parsed || {};
+    const haystack = [
+      record.raw_hex || '',
+      record.annotation || '',
+      p.type || '',
+      p.utf8_text || '',
+      p.command_hex || '',
+      record.fingerprint || '',
+    ].join(' ').toLowerCase();
+    if (!haystack.includes(search)) return false;
+  }
+
+  return true;
+}
+
+async function loadPackets() {
+  const dir = document.getElementById('flt-dir').value;
+  const annotated = document.getElementById('flt-annotated').value;
+  const params = new URLSearchParams({ limit: 200 });
+  if (dir) params.set('direction', dir);
+  if (annotated) params.set('annotated', annotated);
+  const res = await fetch(`${API}/api/packets?${params}`);
+  const data = await res.json();
+  const list = document.getElementById('packet-list');
+  list.innerHTML = '';
+  // 清除折叠计数
+  Object.keys(fpCountMap).forEach(k => delete fpCountMap[k]);
+
+  const all = (data.packets || []).reverse(); // 最新在前
+  const filtered = all.filter(r => matchFilter(r));
+
+  if (collapseMode) {
+    // 折叠：按指纹去重（已经是最新在前，保留第一次出现）
+    const seen = new Set();
+    const counts = {};
+    filtered.forEach(r => {
+      const fp = r.fingerprint || r.raw_hex.substring(0, 16);
+      counts[fp] = (counts[fp] || 0) + 1;
+    });
+    filtered.forEach(r => {
+      const fp = r.fingerprint || r.raw_hex.substring(0, 16);
+      if (!seen.has(fp)) {
+        seen.add(fp);
+        fpCountMap[fp] = counts[fp];
+        prependRowToList(r, counts[fp]);
+      }
+    });
+    document.getElementById('pkt-count').textContent = `折叠后 ${seen.size} 种（总 ${data.total || 0} 条）`;
+  } else {
+    document.getElementById('pkt-count').textContent = `共 ${filtered.length} 条（总 ${data.total || 0}）`;
+    filtered.forEach(r => prependRowToList(r, 0));
+  }
+}
+
+function filterPackets() { loadPackets(); }
+function clearPacketList() { document.getElementById('packet-list').innerHTML = ''; }
+
+function prependRowToList(record, collapseCount = 0) {
+  const list = document.getElementById('packet-list');
+  if (list.children.length >= MAX_PACKET_ROWS) {
+    list.removeChild(list.lastChild);
+  }
+
+  const fp = record.fingerprint || record.raw_hex.substring(0, 16);
+  const row = document.createElement('div');
+  row.className = 'packet-row';
+  row.id = `pkt-${record.id}`;
+  row.dataset.fingerprint = fp;
+  // 折叠模式下设置指纹 id，供后续更新计数
+  if (collapseCount > 0) row.id = `pkt-fp-${fp}`;
+
+  const p = record.parsed;
+  const hasParsed = !!p;
+  const level = p ? (p.level || 'generic') : 'unknown';
+  const noChineseKnown = hasParsed && level === 'known' && !hasChineseContent(p?.utf8_text);
+  const isUnresolved = !hasParsed || noChineseKnown;
+  const parseLabel = isUnresolved ? '未解析' : (level === 'known' ? '已解析' : '通用解析');
+  const parseCls = isUnresolved ? 'unknown' : (level === 'known' ? 'known' : 'generic');
+
+  // pkt-type：有指纹描述时显示"指纹短码 · 描述"，否则显示命令字
+  const desc = record.annotation || (p && p.type) || '';
+  const shortFp = (record.fingerprint || '').substring(8, 16);
+  let typeText = '';
+  if (desc) {
+    typeText = shortFp ? `${shortFp} · ${desc}` : desc;
+  } else if (hasParsed && p && p.command_hex) {
+    typeText = p.command_hex;
+  }
+
+  const countBadge = collapseCount > 1
+    ? `<span class="pkt-collapse-count">×${collapseCount}</span>`
+    : '';
+
+  row.innerHTML = `
+    <div class="packet-header" onclick="togglePktDetail(${record.id})">
+      <span class="dir-badge dir-${record.direction}">${record.direction === 'UP' ? '↑ UP' : '↓ DN'}</span>
+      <span class="pkt-time">${record.ts_str || ''}</span>
+      <span class="pkt-fp mono">${shortFp}</span>
+      ${typeText ? `<span class="pkt-type">${escHtml(typeText)}</span>` : ''}
+      ${countBadge}
+      <span class="parse-badge ${parseCls}">${parseLabel}</span>
+    </div>
+    <div class="pkt-detail" id="pkt-detail-${record.id}">
+      ${renderPktDetail(record)}
+    </div>`;
+  list.insertBefore(row, list.firstChild);
+}
+
+function copyHex(id) {
+  const el = document.getElementById(`hex-content-${id}`);
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent).then(() => {
+    const btn = document.getElementById(`copy-btn-${id}`);
+    if (btn) { btn.textContent = '已复制'; setTimeout(() => { btn.textContent = '复制'; }, 1500); }
+  }).catch(() => {
+    // fallback for older browsers
+    const range = document.createRange();
+    range.selectNode(el);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+    document.execCommand('copy');
+    window.getSelection().removeAllRanges();
+  });
+}
+
+function renderPktDetail(record) {
+  const p = record.parsed;
+  let html = `<div class="pkt-raw-hex-wrapper">
+    <div class="pkt-raw-hex" id="hex-content-${record.id}">${escHtml(record.raw_hex)}</div>
+    <button class="pkt-copy-btn" id="copy-btn-${record.id}" onclick="copyHex(${record.id})">复制</button>
+  </div>`;
+
+  html += `<div class="pkt-fields">指纹：<span class="mono" style="user-select:all">${escHtml(record.fingerprint || '')}</span></div>`;
+
+  if (p) {
+    if (p.utf8_text) {
+      html += `<div class="pkt-utf8">${highlightChinese(escHtml(p.utf8_text))}</div>`;
+    }
+    if (p.command_hex) {
+      html += `<div class="pkt-fields">命令字：<span>${p.command_hex}</span>`;
+      if (p.content_length !== undefined) html += `  内容长度：<span>${p.content_length}</span>`;
+      html += `</div>`;
+    }
+  }
+
+  html += `<div class="annotation-row">
+    <input type="text" id="ann-input-${record.id}"
+      placeholder="为此指纹添加描述（将应用于所有相同指纹的报文）"
+      value="${escAttr(record.annotation || '')}">
+    <button class="btn btn-warn btn-sm" onclick="submitAnnotation(${record.id})">保存指纹描述</button>
+  </div>`;
+  return html;
+}
+
+function togglePktDetail(id) {
+  const d = document.getElementById(`pkt-detail-${id}`);
+  if (d) d.classList.toggle('open');
+}
+
+async function submitAnnotation(id) {
+  const input = document.getElementById(`ann-input-${id}`);
+  if (!input) return;
+  const text = input.value.trim();
+  const res = await api('POST', `/api/packets/${id}/annotate`, { text });
+  if (res.ok && res.fingerprint !== undefined) {
+    updateAllFingerprintAnnotations(res.fingerprint, res.annotation || text);
+  }
+}
+
+// SSE annotation 事件：data 现在携带 {fingerprint, annotation}
+function updatePacketAnnotation(data) {
+  if (data.fingerprint !== undefined) {
+    updateAllFingerprintAnnotations(data.fingerprint, data.annotation || '');
+  }
+}
+
+// 批量更新所有相同指纹行的 pkt-type 显示和标注输入框
+function updateAllFingerprintAnnotations(fp, text) {
+  const shortFp = (fp || '').substring(8, 16);
+  const newTypeText = text ? `${shortFp} · ${text}` : '';
+
+  document.querySelectorAll('.packet-row').forEach(row => {
+    if (row.dataset.fingerprint !== fp) return;
+
+    const header = row.querySelector('.packet-header');
+    if (header) {
+      let typeSpan = header.querySelector('.pkt-type');
+      if (newTypeText) {
+        if (!typeSpan) {
+          typeSpan = document.createElement('span');
+          typeSpan.className = 'pkt-type';
+          const fpSpan = header.querySelector('.pkt-fp');
+          if (fpSpan) fpSpan.after(typeSpan);
+          else header.prepend(typeSpan);
+        }
+        typeSpan.textContent = newTypeText;
+      } else if (typeSpan) {
+        typeSpan.remove();
+      }
+    }
+    // 更新已展开的指纹描述输入框
+    row.querySelectorAll('input[id^="ann-input-"]').forEach(inp => {
+      inp.value = text;
+    });
+  });
+}
+
+// 高亮中文字符
+function highlightChinese(htmlStr) {
+  return htmlStr.replace(/([\u4e00-\u9fa5\u3000-\u303f\uff00-\uffef]+)/g,
+    '<span class="cn-text">$1</span>');
+}
+
+async function sendProbePacket() {
+  const hexStr = document.getElementById('custom-hex').value.trim();
+  if (!hexStr) return;
+  const useQueue = document.getElementById('chk-use-queue').checked;
+  const res = await api('POST', '/api/probe/send', { hex: hexStr, use_queue: useQueue });
+  const el = document.getElementById('custom-send-result');
+  el.className = `msg msg-${res.ok ? 'ok' : 'err'}`;
+  el.textContent = res.ok
+    ? `发送成功 · 方式: ${res.method}${res.sent_bytes !== undefined ? ' · ' + res.sent_bytes + ' bytes' : ''}`
+    : (res.error || '发送失败');
+}
+
+async function parseProbeHex() {
+  const hexStr = document.getElementById('custom-hex').value.trim();
+  if (!hexStr) return;
+  const res = await api('POST', '/api/probe/parse', { hex: hexStr });
+  const el = document.getElementById('custom-send-result');
+  if (res.ok && res.parsed) {
+    const p = res.parsed;
+    el.className = 'msg msg-ok';
+    el.innerHTML = `<b>解析结果</b><br>
+      类型：${p.type || p.level || '通用'}<br>
+      ${p.command_hex ? '命令字：' + p.command_hex + '<br>' : ''}
+      ${p.utf8_text ? 'UTF-8：' + highlightChinese(escHtml(p.utf8_text)) : '无可读内容'}`;
+  } else if (res.ok && !res.parsed) {
+    el.className = 'msg msg-err';
+    el.textContent = '无法解析（帧头不满足最小长度或格式错误）';
+  } else {
+    el.className = 'msg msg-err';
+    el.textContent = res.error || '解析失败';
+  }
+}
+
+// ================================================================== //
+//  HTML 转义工具                                                       //
+// ================================================================== //
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) {
+  if (!s) return '';
+  return String(s).replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+}
+
+// ================================================================== //
+//  角色属性                                                            //
+// ================================================================== //
+
+let statsCollapsed = false;
+
+function toggleStatsPanel() {
+  statsCollapsed = !statsCollapsed;
+  document.getElementById('stats-body').style.display = statsCollapsed ? 'none' : '';
+  document.getElementById('stats-toggle-icon').textContent = statsCollapsed ? '▶' : '▼';
+}
+
+function renderRoleStats(data) {
+  const stats = data.stats || {};
+  const groups = data.groups || {};
+  const order = data.order || [];
+
+  if (!Object.keys(stats).length) {
+    document.getElementById('stats-content').innerHTML = '<span class="text-muted">暂无数据</span>';
+    return;
+  }
+
+  document.getElementById('role-stats-panel').classList.add('visible');
+
+  // 展示分组
+  const groupOrder = ['基础属性', '战斗属性', '角色信息', '其他信息'];
+  let html = '';
+  for (const groupName of groupOrder) {
+    const keys = groups[groupName] || [];
+    const rows = keys.filter(k => stats[k] !== undefined);
+    if (!rows.length) continue;
+    html += `<div class="stats-group"><div class="stats-group-title">${escHtml(groupName)}</div><div class="stats-grid">`;
+    for (const k of rows) {
+      const v = stats[k] || '';
+      const isHighlight = ['等级', '职业'].includes(k);
+      html += `<div class="stat-row"><span class="stat-name">${escHtml(k)}</span><span class="stat-value${isHighlight ? ' highlight' : ''}">${escHtml(v)}</span></div>`;
+    }
+    html += '</div></div>';
+  }
+  document.getElementById('stats-content').innerHTML = html;
+}
+
+// ================================================================== //
+//  折叠同类型报文                                                      //
+// ================================================================== //
+
+let collapseMode = false;
+// 折叠时每个指纹的计数 {fingerprint: count}
+const fpCountMap = {};
+
+function toggleCollapseMode() {
+  collapseMode = !collapseMode;
+  const btn = document.getElementById('btn-collapse-mode');
+  btn.classList.toggle('active', collapseMode);
+  btn.textContent = collapseMode ? '取消折叠' : '折叠同类';
+  loadPackets();
+}
+
+// ================================================================== //
+//  初始化                                                              //
+// ================================================================== //
+(async function init() {
+  startSSE();
+
+  // ---- 恢复"自动重连"勾选状态（localStorage 持久化） ----
+  const chkAR = document.getElementById('chk-auto-reconnect');
+  const savedAR = localStorage.getItem('autoReconnect');
+  if (savedAR !== null) chkAR.checked = (savedAR === 'true');
+  chkAR.addEventListener('change', () => {
+    localStorage.setItem('autoReconnect', chkAR.checked);
+  });
+
+  // 检查是否已有连接状态
+  loadPackets();   // 默认 Tab 是报文探测，页面加载时即刻拉取历史报文
+  const status = await api('GET', '/api/status').catch(() => null);
+  if (status) {
+    prevConnected = !!status.connected;
+    updateStatus(status);
+    if (status.connected) {
+      // 已进入游戏：隐藏所有左侧流程面板
+      document.getElementById('login-panel').style.display = 'none';
+      document.getElementById('server-panel').style.display = 'none';
+      document.getElementById('role-panel').style.display = 'none';
+      // 恢复 lastConnectInfo，保证页面刷新后仍可自动重连
+      const _savedCI = localStorage.getItem('lastConnectInfo');
+      if (_savedCI) {
+        try { Object.assign(lastConnectInfo, JSON.parse(_savedCI)); } catch (_) {}
+      }
+      refreshBackpack();
+    } else if (status.connection_status === 'got_session') {
+      // 已登录未选角：隐藏登录，显示服务器选择
+      document.getElementById('login-panel').style.display = 'none';
+      showServerPanel('', []);
+    }
+  }
+})();
+</script>
+</body>
+</html>
