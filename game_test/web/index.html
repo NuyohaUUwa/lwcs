@@ -150,6 +150,12 @@
   .item-qty { color: var(--text2); font-size: 11px; margin-top: 3px; }
   .item-id { color: #444; font-size: 10px; font-family: monospace; margin-top: 2px; }
   #backpack-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  #backpack-buy-code { font-family: monospace; font-size: 12px; min-width: 280px; flex: 1 1 320px; }
+  #backpack-buy-name { min-width: 160px; flex: 0 1 180px; }
+  #star-stone-log {
+    border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+    padding: 8px; min-height: 80px; max-height: 180px; overflow-y: auto; font-size: 12px;
+  }
 
   /* ---- 聊天 ---- */
   #chat-log {
@@ -219,7 +225,9 @@
   .pkt-utf8 .cn-text { color: #ffd77a; }
   .pkt-fields { font-size: 11px; color: var(--text2); margin-bottom: 8px; }
   .pkt-fields span { color: var(--text); }
-  .annotation-row { display: flex; gap: 6px; margin-top: 6px; }
+  .pkt-meta-row { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; margin-top: 6px; margin-bottom: 8px; }
+  .pkt-meta-row .pkt-fields { margin-bottom: 0; }
+  .annotation-row { display: flex; gap: 6px; margin-top: 0; flex: 1; }
   .annotation-row input { flex: 1; padding: 4px 8px; font-size: 12px; }
   .annotation-row button { padding: 4px 10px; font-size: 12px; }
 
@@ -321,11 +329,9 @@
   .battle-dropdown > summary::after { content: '展开'; color: var(--text2); font-size: 11px; }
   .battle-dropdown[open] > summary::after { content: '收起'; }
   .battle-dropdown-body { padding: 0 10px 10px; }
-  .battle-manage-grid { display: grid; grid-template-columns: minmax(180px, 260px) 1fr auto; gap: 8px; align-items: center; }
 
   @media (max-width: 900px) {
     #layout { grid-template-columns: 1fr; }
-    .battle-manage-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -436,10 +442,30 @@
         <button class="btn btn-warn btn-sm" onclick="decomposeSelected()">分解</button>
         <button class="btn btn-ghost btn-sm" onclick="decomposeAll()">一键分解</button>
         <button class="btn btn-ghost btn-sm" onclick="exchangeWuling()">兑换五灵</button>
+        <button id="btn-star-stone-loop" class="btn btn-primary btn-sm" onclick="toggleStarStoneLoop()">获取升星石</button>
         <button class="btn btn-ghost btn-sm" onclick="refreshBackpack()">刷新</button>
         <span class="text-muted text-sm" id="backpack-count"></span>
       </div>
       <div id="backpack-grid"><div class="text-muted text-sm">背包为空或尚未进入游戏</div></div>
+        <details class="battle-dropdown mt-8">
+          <summary>购买物品管理</summary>
+          <div class="battle-dropdown-body">
+          <div class="battle-row mt-8">
+            <select id="backpack-buy-select" onchange="selectBuyItem(this.value)" style="width:100%; padding:4px 8px; font-size:12px;">
+              <option value="">请选择常用物品</option>
+            </select>
+            <div class="text-muted text-sm">下拉选择常用购买物品，购买成功后会自动解析并更新到背包列表。</div>
+            <button class="btn btn-danger btn-sm" onclick="deleteBuyItem()">删除当前</button>
+          </div>
+          <div id="backpack-buy-row" class="battle-row mt-8">
+            <input type="text" id="backpack-buy-name" placeholder="物品名称">
+            <input type="text" id="backpack-buy-code" placeholder="输入 22 位物品编码，如：00112233445566778899aa">
+            <button class="btn btn-primary btn-sm" onclick="buyItem()">购买物品</button>
+            <button class="btn btn-ghost btn-sm" onclick="saveBuyItem()">保存常用</button>
+          </div>
+        </div>
+      </details>
+      <div id="star-stone-log" class="mt-8"><div class="text-muted text-sm">等待执行获取升星石流程…</div></div>
       <div id="backpack-msg" class="mt-8"></div>
     </div>
 
@@ -472,7 +498,7 @@
         <details class="battle-dropdown mt-8">
           <summary>怪物管理</summary>
           <div class="battle-dropdown-body">
-            <div class="battle-manage-grid">
+            <div class="battle-row mt-8">
               <select id="battle-monster-manage-select" onchange="selectMonster(this.value)" style="width:100%; padding:4px 8px; font-size:12px;">
                 <option value="">请选择怪物</option>
               </select>
@@ -529,6 +555,13 @@
             <label style="color:var(--text2); font-size:12px;">
               <input type="checkbox" id="chk-use-queue" checked> 走发送队列（节流 0.6s）
             </label>
+            <label style="color:var(--text2); font-size:12px;">
+              random_num：
+              <select id="custom-random-mode" style="width:auto; padding:3px 6px; font-size:12px;">
+                <option value="hex4" selected>hex4 替换 21-24</option>
+                <option value="hex6">hex6 替换 21-26</option>
+              </select>
+            </label>
             <button class="btn btn-primary btn-sm" onclick="sendProbePacket()">发送</button>
             <button class="btn btn-ghost btn-sm" onclick="parseProbeHex()">仅解析</button>
           </div>
@@ -565,7 +598,7 @@
             <input type="text" id="flt-search" placeholder="搜索 hex / 指纹描述 / UTF-8 内容…"
               style="flex:1; padding:4px 8px; font-size:12px;" oninput="filterPackets()">
             <label style="flex-shrink:0;">排除指纹</label>
-            <input type="text" id="flt-exclude-fp" placeholder="如：514f, ec07（逗号分隔）"
+            <input type="text" id="flt-exclude-fp" value="e8030100514f,e80302000504,e8030100f207" placeholder="如：514f, ec07（逗号分隔）"
               style="flex:1; padding:4px 8px; font-size:12px;" oninput="filterPackets()">
           </div>
         </div>

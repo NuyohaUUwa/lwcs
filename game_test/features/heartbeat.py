@@ -6,10 +6,16 @@
 import threading
 import time
 
+from utils.random_num import random_num_hex4
+
 HEARTBEAT_SLEEP_S = 5
 STALE_WARN_S = 60
 STALE_TIMEOUT_S = 90
-HEARTBEAT_PACKET = "12000000e80302000504000015250204000000000000"
+HEARTBEAT_PACKET_TEMPLATE = "12000000e80302000504{random_num}15250204000000000000"
+
+
+def build_heartbeat_packet() -> str:
+    return HEARTBEAT_PACKET_TEMPLATE.format(random_num=random_num_hex4())
 
 
 def start_heartbeat(stop_event: threading.Event, on_timeout) -> threading.Thread:
@@ -42,7 +48,7 @@ def start_heartbeat(stop_event: threading.Event, on_timeout) -> threading.Thread
                     elif elapsed <= STALE_WARN_S:
                         stale_warned = False
 
-                    res = send_raw_action(HEARTBEAT_PACKET, priority=1, use_queue=True)
+                    res = send_raw_action(build_heartbeat_packet(), priority=1, use_queue=True)
                     if not res.get("ok"):
                         print(f"[heartbeat] 发送心跳包失败: {res.get('error')}")
 

@@ -6,12 +6,21 @@ const appApi = (method, path, body) => window.GameControllers.performJsonRequest
 let selectedServer = null;  // {name, ip, port}
 let selectedRoleId = null;
 let selectedItemId = null;
+let backpackItemsCache = [];
 let eventSource = null;
 let isConnected = false;
 let prevConnected = false;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 let lastConnectInfo = { account: '', password: '', loginServer: '', serverIp: '', serverPort: 0, serverName: '', roleId: '' };
+let buyItemFavorites = [];
+let selectedBuyItemCode = '';
+let starStoneLoopRunning = false;
+let starStoneAwaiting = 'idle';
+let starStoneLoopCount = 0;
+let starStoneTotalStone = 0;
+let starStoneTotalFragment = 0;
+let starStoneTimer = null;
 let battleMonsters = [];
 let selectedMonsterCode = '';
 let battleLoopRunning = false;
@@ -34,6 +43,11 @@ let battleManualSingle = false; // 当前轮是否为手动单次
 // ================================================================== //
 async function api(method, path, body) {
   return appApi(method, path, body);
+}
+
+function withValidationWarning(baseText, res) {
+  const warn = res?.validation_warning;
+  return warn ? `${baseText}；${warn}` : baseText;
 }
 
 function showMsg(elId, text, type = 'info') {
@@ -68,10 +82,14 @@ function startSSE() {
     try {
       const msg = JSON.parse(e.data);
       if (msg.type === 'status') updateStatus(msg.data);
-      else if (msg.type === 'backpack') renderBackpack(msg.data);
+      else if (msg.type === 'backpack') {
+        renderBackpack(msg.data);
+        handleStarStoneBackpackUpdate();
+      }
       else if (msg.type === 'packet') {
         appendPacketRow(msg.data);
         appendBattlePacketLine(msg.data);
+        handleStarStonePacket(msg.data);
       }
       else if (msg.type === 'annotation') updatePacketAnnotation(msg.data);
       else if (msg.type === 'role_stats') renderRoleStats(msg.data);
@@ -455,14 +473,15 @@ async function refreshBackpack() {
 }
 
 function renderBackpack(items) {
+  backpackItemsCache = Array.isArray(items) ? items : [];
   const grid = document.getElementById('backpack-grid');
-  document.getElementById('backpack-count').textContent = `共 ${items.length} 件`;
-  if (!items || items.length === 0) {
+  document.getElementById('backpack-count').textContent = `共 ${backpackItemsCache.length} 件`;
+  if (!backpackItemsCache.length) {
     grid.innerHTML = '<div class="text-muted text-sm">背包为空</div>';
     return;
   }
   grid.innerHTML = '';
-  items.forEach(item => {
+  backpackItemsCache.forEach(item => {
     const d = document.createElement('div');
     d.className = 'item-card' + (item.can_disassemble ? ' can-decompose' : '');
     if (item.item_id === selectedItemId) d.classList.add('selected');
@@ -481,19 +500,19 @@ function renderBackpack(items) {
 async function useSelected() {
   if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
   const res = await api('POST', '/api/item/use', { item_id: selectedItemId, quantity: 1 });
-  showMsg('backpack-msg', res.ok ? `已加入发送队列 x${res.queued}` : res.error, res.ok ? 'ok' : 'err');
+  showMsg('backpack-msg', res.ok ? withValidationWarning(`已加入发送队列 x${res.queued}`, res) : res.error, res.ok ? 'ok' : 'err');
 }
 
 async function dropSelected() {
   if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
   const res = await api('POST', '/api/item/drop', { item_id: selectedItemId, quantity: 1 });
-  showMsg('backpack-msg', res.ok ? '丢弃请求已入队' : res.error, res.ok ? 'ok' : 'err');
+  showMsg('backpack-msg', res.ok ? withValidationWarning('丢弃请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
 }
 
 async function decomposeSelected() {
   if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
   const res = await api('POST', '/api/item/decompose', { item_id: selectedItemId });
-  showMsg('backpack-msg', res.ok ? '分解请求已入队' : res.error, res.ok ? 'ok' : 'err');
+  showMsg('backpack-msg', res.ok ? withValidationWarning('分解请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
 }
 
 async function decomposeAll() {
@@ -505,13 +524,235 @@ async function decomposeAll() {
   }
   const res = await api('POST', '/api/item/decompose-all', { protected_items });
   showMsg('backpack-msg',
-    res.ok ? `一键分解完成：已分解 ${res.queued?.length || 0} 件，跳过 ${res.skipped?.length || 0} 件` : res.error,
+    res.ok ? withValidationWarning(`一键分解完成：已分解 ${res.queued?.length || 0} 件，跳过 ${res.skipped?.length || 0} 件`, res) : res.error,
     res.ok ? 'ok' : 'err');
 }
 
 async function exchangeWuling() {
   const res = await api('POST', '/api/item/exchange-wuling');
-  showMsg('backpack-msg', res.ok ? '兑换五灵请求已入队' : res.error, res.ok ? 'ok' : 'err');
+  showMsg('backpack-msg', res.ok ? withValidationWarning('兑换五灵请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
+}
+
+async function loadBuyItems() {
+  const res = await api('GET', '/api/buy-items').catch(() => null);
+  if (!res || !res.ok) return;
+  buyItemFavorites = Array.isArray(res.items) ? res.items : [];
+  renderBuyItems();
+}
+
+function renderBuyItems() {
+  const select = document.getElementById('backpack-buy-select');
+  if (!select) return;
+  if (!buyItemFavorites.length) {
+    select.innerHTML = '<option value="">请选择常用物品</option>';
+    selectedBuyItemCode = '';
+    return;
+  }
+  const options = buyItemFavorites.map((x) =>
+    `<option value="${escAttr(x.code || '')}">${escHtml(x.name || '')} (${escHtml(x.code || '')})</option>`
+  ).join('');
+  if (!buyItemFavorites.some((x) => (x.code || '').toLowerCase() === selectedBuyItemCode)) {
+    selectedBuyItemCode = (buyItemFavorites[0]?.code || '').toLowerCase();
+  }
+  select.innerHTML = `<option value="">请选择常用物品</option>${options}`;
+  select.value = selectedBuyItemCode || '';
+}
+
+function selectBuyItem(code) {
+  selectedBuyItemCode = String(code || '').trim().toLowerCase();
+  const item = buyItemFavorites.find((x) => (x.code || '').toLowerCase() === selectedBuyItemCode);
+  document.getElementById('backpack-buy-select').value = selectedBuyItemCode;
+  document.getElementById('backpack-buy-code').value = selectedBuyItemCode;
+  document.getElementById('backpack-buy-name').value = item ? (item.name || '') : '';
+}
+
+async function buyItem() {
+  const input = document.getElementById('backpack-buy-code');
+  const itemCode = input.value.trim().toLowerCase();
+  if (!itemCode) { showMsg('backpack-msg', '请输入 22 位物品编码', 'err'); return; }
+  const res = await api('POST', '/api/item/buy', { item_code: itemCode });
+  showMsg('backpack-msg', res.ok ? withValidationWarning('购买请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
+}
+
+async function saveBuyItem() {
+  const name = document.getElementById('backpack-buy-name').value.trim();
+  const code = document.getElementById('backpack-buy-code').value.trim().toLowerCase();
+  if (!name || !code) { showMsg('backpack-msg', '请填写物品名称和 22 位编码', 'err'); return; }
+  const res = await api('POST', '/api/buy-items', { name, code });
+  if (res.ok) {
+    buyItemFavorites = Array.isArray(res.items) ? res.items : [];
+    selectedBuyItemCode = code;
+    renderBuyItems();
+    document.getElementById('backpack-buy-select').value = code;
+    showMsg('backpack-msg', '常用购买物品已保存', 'ok');
+  } else {
+    showMsg('backpack-msg', res.error || '保存失败', 'err');
+  }
+}
+
+async function deleteBuyItem() {
+  const code = document.getElementById('backpack-buy-code').value.trim().toLowerCase()
+    || document.getElementById('backpack-buy-select').value.trim().toLowerCase();
+  if (!code) { showMsg('backpack-msg', '请先选择或输入要删除的常用物品', 'err'); return; }
+  const res = await api('DELETE', `/api/buy-items/${encodeURIComponent(code)}`);
+  if (res.ok) {
+    buyItemFavorites = Array.isArray(res.items) ? res.items : [];
+    if (selectedBuyItemCode === code) selectedBuyItemCode = '';
+    renderBuyItems();
+    document.getElementById('backpack-buy-select').value = '';
+    document.getElementById('backpack-buy-name').value = '';
+    document.getElementById('backpack-buy-code').value = '';
+    showMsg('backpack-msg', '常用购买物品已删除', 'ok');
+  } else {
+    showMsg('backpack-msg', res.error || '删除失败', 'err');
+  }
+}
+
+function appendStarStoneLog(text, kind = 'info') {
+  const box = document.getElementById('star-stone-log');
+  if (!box) return;
+  const line = document.createElement('div');
+  line.className = kind === 'err' ? 'text-red' : kind === 'ok' ? 'text-green' : 'text-muted';
+  line.textContent = text;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function updateStarStoneButton() {
+  const btn = document.getElementById('btn-star-stone-loop');
+  if (!btn) return;
+  btn.textContent = starStoneLoopRunning ? '停止获取升星石' : '获取升星石';
+  btn.className = starStoneLoopRunning ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+}
+
+function clearStarStoneTimer() {
+  if (starStoneTimer) {
+    clearTimeout(starStoneTimer);
+    starStoneTimer = null;
+  }
+}
+
+function decodePacketText(rawHex) {
+  try {
+    return bytesFromHex(rawHex).decodeText;
+  } catch (_) {
+    return '';
+  }
+}
+
+function bytesFromHex(rawHex) {
+  const cleanHex = String(rawHex || '').replace(/\s+/g, '').toLowerCase();
+  const bytes = [];
+  for (let i = 0; i < cleanHex.length; i += 2) {
+    bytes.push(parseInt(cleanHex.slice(i, i + 2), 16));
+  }
+  const arr = new Uint8Array(bytes);
+  return {
+    decodeText: new TextDecoder('utf-8', { fatal: false }).decode(arr).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim(),
+  };
+}
+
+function parseStarStoneRewards(record) {
+  const text = decodePacketText(record?.raw_hex || '');
+  if (!text || !text.includes('分解装备')) return null;
+  const stone = Number((text.match(/升星(?:基础)?石\*(\d+)/) || [])[1] || 0);
+  const fragment = Number((text.match(/宝石碎片\*(\d+)/) || [])[1] || 0);
+  if (!stone && !fragment) return null;
+  return { stone, fragment, text };
+}
+
+function findStarStoneBuyFavorite() {
+  return buyItemFavorites.find((x) => /特步鞋|特步靴/.test(x.name || ''));
+}
+
+function findStarStoneDecomposeItem() {
+  return backpackItemsCache.find((x) => /特步鞋|特步靴/.test(x.name || ''));
+}
+
+function stopStarStoneLoop(reason = '', msgType = 'info') {
+  starStoneLoopRunning = false;
+  starStoneAwaiting = 'idle';
+  clearStarStoneTimer();
+  updateStarStoneButton();
+  if (reason) {
+    appendStarStoneLog(reason, msgType === 'err' ? 'err' : 'ok');
+    showMsg('backpack-msg', reason, msgType);
+  }
+}
+
+async function runStarStoneCycle() {
+  if (!starStoneLoopRunning) return;
+  const favorite = findStarStoneBuyFavorite();
+  if (!favorite) {
+    stopStarStoneLoop('未找到常用购买物品“特步鞋/特步靴”，请先在购买物品管理中保存', 'err');
+    return;
+  }
+  starStoneAwaiting = 'buy';
+  const res = await api('POST', '/api/item/buy', { item_code: favorite.code });
+  if (!res.ok) {
+    stopStarStoneLoop(res.error || '购买失败，已停止', 'err');
+    return;
+  }
+  appendStarStoneLog(`第${starStoneLoopCount + 1}轮：已发送购买 ${favorite.name}`, 'info');
+}
+
+async function startStarStoneLoop() {
+  if (starStoneLoopRunning) return;
+  starStoneLoopRunning = true;
+  starStoneAwaiting = 'idle';
+  starStoneLoopCount = 0;
+  starStoneTotalStone = 0;
+  starStoneTotalFragment = 0;
+  clearStarStoneTimer();
+  document.getElementById('star-stone-log').innerHTML = '';
+  updateStarStoneButton();
+  appendStarStoneLog('开始执行获取升星石：先传送上京', 'info');
+  const tpRes = await api('POST', '/api/teleport', { destination: '上京' });
+  if (!tpRes.ok) {
+    stopStarStoneLoop(tpRes.error || '传送上京失败，已停止', 'err');
+    return;
+  }
+  appendStarStoneLog('已发送传送上京', 'ok');
+  starStoneTimer = setTimeout(runStarStoneCycle, 1000);
+}
+
+function toggleStarStoneLoop() {
+  if (starStoneLoopRunning) {
+    stopStarStoneLoop('已手动停止获取升星石', 'info');
+    return;
+  }
+  startStarStoneLoop();
+}
+
+async function handleStarStonePacket(record) {
+  if (!starStoneLoopRunning || record?.direction !== 'DN') return;
+  const fingerprint = record.fingerprint || '';
+  const text = decodePacketText(record.raw_hex || '');
+
+  if (text.includes('包裹已满')) {
+    stopStarStoneLoop('包裹已满，已自动停止', 'err');
+    return;
+  }
+
+  if (starStoneAwaiting === 'buy' && fingerprint.includes('e607')) {
+    await handleStarStoneBackpackUpdate();
+    return;
+  }
+
+  if (starStoneAwaiting === 'decompose') {
+    const rewards = parseStarStoneRewards(record);
+    if (!rewards) return;
+    starStoneLoopCount += 1;
+    starStoneTotalStone += rewards.stone;
+    starStoneTotalFragment += rewards.fragment;
+    appendStarStoneLog(
+      `第${starStoneLoopCount}轮：获得升星石 ${rewards.stone}，获得宝石碎片 ${rewards.fragment}；累计 升星石 ${starStoneTotalStone} / 宝石碎片 ${starStoneTotalFragment}`,
+      'ok'
+    );
+    starStoneAwaiting = 'idle';
+    clearStarStoneTimer();
+    starStoneTimer = setTimeout(runStarStoneCycle, 1000);
+  }
 }
 
 // ================================================================== //
@@ -1004,6 +1245,93 @@ function handleWorldChat(parsed) {
 //  报文探测                                                            //
 // ================================================================== //
 const MAX_PACKET_ROWS = 200;  // 前端最多保留 200 条
+let currentAutoExpandedDetailId = null;
+
+function sortPacketsNewestFirst(records) {
+  return [...(records || [])].sort((a, b) => {
+    const tsA = Number(a?.ts || 0);
+    const tsB = Number(b?.ts || 0);
+    if (tsA !== tsB) return tsB - tsA;
+    return Number(b?.id || 0) - Number(a?.id || 0);
+  });
+}
+
+async function handleStarStoneBackpackUpdate() {
+  if (!starStoneLoopRunning || starStoneAwaiting !== 'buy') return;
+  const item = findStarStoneDecomposeItem();
+  if (!item) return;
+  starStoneAwaiting = 'decompose';
+  const res = await api('POST', '/api/item/decompose', { item_id: item.item_id });
+  if (!res.ok) {
+    stopStarStoneLoop(res.error || '分解失败，已停止', 'err');
+    return;
+  }
+  appendStarStoneLog(`第${starStoneLoopCount + 1}轮：已发送分解 ${item.name}`, 'info');
+}
+
+function buildPacketRow(record, collapseCount = 0, openByDefault = false) {
+  const fp = record.fingerprint || record.raw_hex.substring(0, 16);
+  const row = document.createElement('div');
+  row.className = 'packet-row';
+  row.id = `pkt-${record.id}`;
+  row.dataset.fingerprint = fp;
+  row.dataset.packetId = String(record.id || '');
+  row.dataset.packetTs = String(record.ts || '');
+  if (collapseCount > 0) row.id = `pkt-fp-${fp}`;
+
+  const p = record.parsed;
+  const hasParsed = !!p;
+  const level = p ? (p.level || 'generic') : 'unknown';
+  const noChineseKnown = hasParsed && level === 'known' && !hasChineseContent(p?.utf8_text);
+  const isUnresolved = !hasParsed || noChineseKnown;
+  const parseLabel = isUnresolved ? '未解析' : (level === 'known' ? '已解析' : '通用解析');
+  const parseCls = isUnresolved ? 'unknown' : (level === 'known' ? 'known' : 'generic');
+
+  const desc = record.annotation || (p && p.type) || '';
+  const shortFp = (record.fingerprint || '').substring(8, 16);
+  let typeText = '';
+  if (desc) {
+    typeText = shortFp ? `${shortFp} · ${desc}` : desc;
+  } else if (hasParsed && p && p.command_hex) {
+    typeText = p.command_hex;
+  }
+
+  const countBadge = collapseCount > 1
+    ? `<span class="pkt-collapse-count">×${collapseCount}</span>`
+    : '';
+
+  row.innerHTML = `
+    <div class="packet-header" onclick="togglePktDetail(${record.id})">
+      <span class="dir-badge dir-${record.direction}">${record.direction === 'UP' ? '↑ UP' : '↓ DN'}</span>
+      <span class="pkt-time">${record.ts_str || ''}</span>
+      <span class="pkt-fp mono">${shortFp}</span>
+      ${typeText ? `<span class="pkt-type">${escHtml(typeText)}</span>` : ''}
+      ${countBadge}
+      <span class="parse-badge ${parseCls}">${parseLabel}</span>
+    </div>
+    <div class="pkt-detail" id="pkt-detail-${record.id}">
+      ${renderPktDetail(record)}
+    </div>`;
+  if (openByDefault) {
+    const detail = row.querySelector('.pkt-detail');
+    if (detail) detail.classList.add('open');
+  }
+  return row;
+}
+
+function insertPacketRowAtTop(row) {
+  const list = document.getElementById('packet-list');
+  if (currentAutoExpandedDetailId) {
+    const prev = document.getElementById(currentAutoExpandedDetailId);
+    if (prev) prev.classList.remove('open');
+  }
+  list.insertBefore(row, list.firstChild);
+  const opened = row.querySelector('.pkt-detail.open');
+  currentAutoExpandedDetailId = opened ? opened.id : null;
+  while (list.children.length > MAX_PACKET_ROWS) {
+    list.removeChild(list.lastChild);
+  }
+}
 
 function appendPacketRow(record) {
   if (document.getElementById('tab-probe').classList.contains('active')) {
@@ -1011,20 +1339,13 @@ function appendPacketRow(record) {
     if (collapseMode) {
       const fp = record.fingerprint || record.raw_hex.substring(0, 16);
       fpCountMap[fp] = (fpCountMap[fp] || 0) + 1;
-      // 查找是否已有该指纹的行
       const existing = document.getElementById(`pkt-fp-${CSS.escape(fp)}`);
-      if (existing) {
-        // 更新计数和内容
-        const countEl = existing.querySelector('.pkt-collapse-count');
-        if (countEl) countEl.textContent = `×${fpCountMap[fp]}`;
-        return;
-      }
-      prependRowToList(record, fpCountMap[fp]);
+      if (existing) existing.remove();
+      insertPacketRowAtTop(buildPacketRow(record, fpCountMap[fp], true));
     } else {
-      prependRowToList(record, 0);
+      insertPacketRowAtTop(buildPacketRow(record, 0, true));
     }
   }
-  // 若是世界频道消息，也转发到聊天
   if (record.direction === 'DN' && record.parsed) {
     const fp = record.fingerprint || '';
     if (fp.includes('f207') || (record.parsed.type && record.parsed.type.includes('世界'))) {
@@ -1054,7 +1375,6 @@ function matchFilter(record) {
 
   if (annotated === 'true' && !record.annotation) return false;
 
-  // 排除指纹（逗号分隔，任一命中则排除）
   if (excludeFpRaw) {
     const excludeList = excludeFpRaw.split(',').map(s => s.trim()).filter(Boolean);
     const fp = (record.fingerprint || '').toLowerCase();
@@ -1063,7 +1383,6 @@ function matchFilter(record) {
     }
   }
 
-  // 关键词搜索（在 raw_hex / annotation / type / utf8_text / command_hex 中查找）
   if (search) {
     const p = record.parsed || {};
     const haystack = [
@@ -1090,10 +1409,11 @@ async function loadPackets() {
   const data = await res.json();
   const list = document.getElementById('packet-list');
   list.innerHTML = '';
+  currentAutoExpandedDetailId = null;
   // 清除折叠计数
   Object.keys(fpCountMap).forEach(k => delete fpCountMap[k]);
 
-  const all = (data.packets || []).reverse(); // 最新在前
+  const all = sortPacketsNewestFirst(data.packets || []);
   const filtered = all.filter(r => matchFilter(r));
 
   if (collapseMode) {
@@ -1109,68 +1429,20 @@ async function loadPackets() {
       if (!seen.has(fp)) {
         seen.add(fp);
         fpCountMap[fp] = counts[fp];
-        prependRowToList(r, counts[fp]);
+        list.appendChild(buildPacketRow(r, counts[fp], seen.size === 1));
       }
     });
     document.getElementById('pkt-count').textContent = `折叠后 ${seen.size} 种（总 ${data.total || 0} 条）`;
   } else {
     document.getElementById('pkt-count').textContent = `共 ${filtered.length} 条（总 ${data.total || 0}）`;
-    filtered.forEach(r => prependRowToList(r, 0));
+    filtered.forEach((r, i) => list.appendChild(buildPacketRow(r, 0, i === 0)));
   }
 }
 
 function filterPackets() { loadPackets(); }
-function clearPacketList() { document.getElementById('packet-list').innerHTML = ''; }
-
-function prependRowToList(record, collapseCount = 0) {
-  const list = document.getElementById('packet-list');
-  if (list.children.length >= MAX_PACKET_ROWS) {
-    list.removeChild(list.lastChild);
-  }
-
-  const fp = record.fingerprint || record.raw_hex.substring(0, 16);
-  const row = document.createElement('div');
-  row.className = 'packet-row';
-  row.id = `pkt-${record.id}`;
-  row.dataset.fingerprint = fp;
-  // 折叠模式下设置指纹 id，供后续更新计数
-  if (collapseCount > 0) row.id = `pkt-fp-${fp}`;
-
-  const p = record.parsed;
-  const hasParsed = !!p;
-  const level = p ? (p.level || 'generic') : 'unknown';
-  const noChineseKnown = hasParsed && level === 'known' && !hasChineseContent(p?.utf8_text);
-  const isUnresolved = !hasParsed || noChineseKnown;
-  const parseLabel = isUnresolved ? '未解析' : (level === 'known' ? '已解析' : '通用解析');
-  const parseCls = isUnresolved ? 'unknown' : (level === 'known' ? 'known' : 'generic');
-
-  // pkt-type：有指纹描述时显示"指纹短码 · 描述"，否则显示命令字
-  const desc = record.annotation || (p && p.type) || '';
-  const shortFp = (record.fingerprint || '').substring(8, 16);
-  let typeText = '';
-  if (desc) {
-    typeText = shortFp ? `${shortFp} · ${desc}` : desc;
-  } else if (hasParsed && p && p.command_hex) {
-    typeText = p.command_hex;
-  }
-
-  const countBadge = collapseCount > 1
-    ? `<span class="pkt-collapse-count">×${collapseCount}</span>`
-    : '';
-
-  row.innerHTML = `
-    <div class="packet-header" onclick="togglePktDetail(${record.id})">
-      <span class="dir-badge dir-${record.direction}">${record.direction === 'UP' ? '↑ UP' : '↓ DN'}</span>
-      <span class="pkt-time">${record.ts_str || ''}</span>
-      <span class="pkt-fp mono">${shortFp}</span>
-      ${typeText ? `<span class="pkt-type">${escHtml(typeText)}</span>` : ''}
-      ${countBadge}
-      <span class="parse-badge ${parseCls}">${parseLabel}</span>
-    </div>
-    <div class="pkt-detail" id="pkt-detail-${record.id}">
-      ${renderPktDetail(record)}
-    </div>`;
-  list.insertBefore(row, list.firstChild);
+function clearPacketList() {
+  document.getElementById('packet-list').innerHTML = '';
+  currentAutoExpandedDetailId = null;
 }
 
 function copyHex(id) {
@@ -1197,7 +1469,15 @@ function renderPktDetail(record) {
     <button class="pkt-copy-btn" id="copy-btn-${record.id}" onclick="copyHex(${record.id})">复制</button>
   </div>`;
 
-  html += `<div class="pkt-fields">指纹：<span class="mono" style="user-select:all">${escHtml(record.fingerprint || '')}</span></div>`;
+  html += `<div class="pkt-meta-row">
+    <div class="pkt-fields">指纹：<span class="mono" style="user-select:all">${escHtml(record.fingerprint || '')}</span></div>
+    <div class="annotation-row">
+      <input type="text" id="ann-input-${record.id}"
+        placeholder="为此指纹添加描述（将应用于所有相同指纹的报文）"
+        value="${escAttr(record.annotation || '')}">
+      <button class="btn btn-warn btn-sm" onclick="submitAnnotation(${record.id})">保存指纹描述</button>
+    </div>
+  </div>`;
 
   if (p) {
     if (p.utf8_text) {
@@ -1210,12 +1490,6 @@ function renderPktDetail(record) {
     }
   }
 
-  html += `<div class="annotation-row">
-    <input type="text" id="ann-input-${record.id}"
-      placeholder="为此指纹添加描述（将应用于所有相同指纹的报文）"
-      value="${escAttr(record.annotation || '')}">
-    <button class="btn btn-warn btn-sm" onclick="submitAnnotation(${record.id})">保存指纹描述</button>
-  </div>`;
   return html;
 }
 
@@ -1281,8 +1555,17 @@ function randomNumHex4() {
   return Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0');
 }
 
+function randomNumHex6() {
+  return (0x100000 + Math.floor(Math.random() * (0x1000000 - 0x100000))).toString(16).padStart(6, '0');
+}
+
 function applyCustomPacketRandomNum(hexStr) {
   const cleanHex = String(hexStr || '').replace(/\s+/g, '').toLowerCase();
+  const mode = document.getElementById('custom-random-mode')?.value || 'hex4';
+  if (mode === 'hex6') {
+    if (cleanHex.length < 26) return cleanHex;
+    return cleanHex.slice(0, 20) + randomNumHex6() + cleanHex.slice(26);
+  }
   if (cleanHex.length < 24) return cleanHex;
   return cleanHex.slice(0, 20) + randomNumHex4() + cleanHex.slice(24);
 }
@@ -1298,7 +1581,7 @@ async function sendProbePacket() {
   const el = document.getElementById('custom-send-result');
   el.className = `msg msg-${res.ok ? 'ok' : 'err'}`;
   el.textContent = res.ok
-    ? `发送成功 · 方式: ${res.method}${res.sent_bytes !== undefined ? ' · ' + res.sent_bytes + ' bytes' : ''}`
+    ? withValidationWarning(`发送成功 · 方式: ${res.method}${res.sent_bytes !== undefined ? ' · ' + res.sent_bytes + ' bytes' : ''}`, res)
     : (res.error || '发送失败');
 }
 
@@ -1431,5 +1714,6 @@ function toggleCollapseMode() {
   loadMonsters();
   loadAutoUseRules();
   loadQuickLogins();
+  loadBuyItems();
   updateBattleStatsText();
 })();

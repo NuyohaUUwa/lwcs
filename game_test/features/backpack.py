@@ -14,6 +14,7 @@ from core.session import get_session, Item
 # 背包物品指纹类型映射
 _FINGERPRINT_MAP = {
     "e8030100d607": "backpack_list",       # 背包物品列表（S1礼包等）
+    "e8030100e607": "item_bought",         # 购买成功
     "e8030100ec07": "backpack_used",       # 背包已使用/礼包
     "e8030100ed07": "item_obtained",       # 获得物品
 }
@@ -28,6 +29,9 @@ def dispatch_backpack_packet(packet_hex: str) -> bool:
 
     if "d607" in fingerprint:
         _parse_backpack_list(packet_hex)
+        return True
+    if "e607" in fingerprint:
+        _parse_item_bought(packet_hex)
         return True
     if "ec07" in fingerprint:
         _parse_backpack_change(packet_hex)
@@ -89,12 +93,37 @@ def _parse_backpack_change(packet_hex: str):
     """处理 ec07 背包变化报文（礼包使用、消耗等）。"""
     _parse_items_by_type(packet_hex, "ce00")
     _parse_items_by_type(packet_hex, "cd00")
+    if "e88eb7e5be97efbc9a" in packet_hex.lower():
+        _parse_embedded_obtained_packets(packet_hex)
 
 
 def _parse_item_obtained(packet_hex: str):
     """处理 ed07 获得物品报文。"""
     _parse_items_by_type(packet_hex, "ce00")
     _parse_items_by_type(packet_hex, "cd00")
+
+
+def _parse_item_bought(packet_hex: str):
+    """处理 e607 购买成功报文。"""
+    _parse_items_by_type(packet_hex, "ce00")
+    _parse_items_by_type(packet_hex, "cd00")
+
+
+def _parse_embedded_obtained_packets(packet_hex: str):
+    """
+    处理 ec07 中拼接的 ed07 子包。
+    常见场景：'已使用xxx礼包，获得：' 文本后直接跟一段 ed07 物品获得报文。
+    """
+    packet_hex_l = packet_hex.lower()
+    marker = "e8030100ed07"
+    start = 0
+    while True:
+        idx = packet_hex_l.find(marker, start)
+        if idx < 8:
+            break
+        sub_packet = packet_hex[idx - 8:]
+        _parse_item_obtained(sub_packet)
+        start = idx + len(marker)
 
 
 # ------------------------------------------------------------------ #

@@ -7,6 +7,17 @@ from core.session import get_session
 from utils.random_num import random_num_hex4, random_num_hex6
 
 
+def _normalize_hex(value: str, expected_len: int, name: str) -> str:
+    clean = str(value or "").strip().lower()
+    if len(clean) != expected_len:
+        raise ValueError(f"{name} 必须是 {expected_len} 位 hex")
+    try:
+        int(clean, 16)
+    except ValueError as e:
+        raise ValueError(f"{name} 不是合法 hex") from e
+    return clean
+
+
 def build_use_item_packets(item_id: str, quantity: int = 1) -> list[str]:
     packets = []
     for _ in range(quantity):
@@ -40,6 +51,11 @@ def build_decompose_packet(item_id: str) -> str:
 
 def build_exchange_wuling_packet() -> str:
     return "27000000e8030d00fe03f5fff50510040000150000004a02000002069d0900000000000000000001000000"
+
+
+def build_buy_item_packet(item_code: str) -> str:
+    code = _normalize_hex(item_code, 22, "item_code")
+    return "27000000e8030d00fe03" + random_num_hex4() + "f5051004000015000000" + code + "00000000000001000000"
 
 
 def pick_decompose_targets(protected_items: list | None = None) -> tuple[list, list]:

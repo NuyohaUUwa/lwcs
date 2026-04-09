@@ -19,12 +19,16 @@ from features.backpack import get_backpack_snapshot
 from features.battle import get_auto_use_rules, set_auto_use_rules
 from features.packet_probe import annotate_packet, get_all_fingerprints, send_probe_packet, try_parse_packet
 from features.role_stats import STAT_GROUPS, STAT_NAMES
+from features.teleport import get_teleport_destinations
 from services.action_manager import send_action
 from services.data_manager import (
+    delete_buy_item,
     delete_quick_login,
     get_monsters,
+    load_buy_items,
     load_quick_logins,
     save_monsters,
+    upsert_buy_item,
     upsert_quick_login,
 )
 from services.flow_manager import disconnect_flow, fetch_roles_flow, login_flow, select_role_flow
@@ -142,10 +146,27 @@ def api_exchange_wuling():
     return _json_ok(send_action("item.exchange_wuling", {}))
 
 
+@app.route("/api/item/buy", methods=["POST"])
+def api_item_buy():
+    body = request.get_json(silent=True) or {}
+    return _json_ok(send_action("item.buy", body))
+
+
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
     body = request.get_json(silent=True) or {}
     return _json_ok(send_action("chat.send", body))
+
+
+@app.route("/api/teleport/destinations", methods=["GET"])
+def api_teleport_destinations():
+    return jsonify({"ok": True, "items": get_teleport_destinations()})
+
+
+@app.route("/api/teleport", methods=["POST"])
+def api_teleport():
+    body = request.get_json(silent=True) or {}
+    return _json_ok(send_action("teleport.go", body))
 
 
 @app.route("/api/battle/start", methods=["POST"])
@@ -232,6 +253,22 @@ def api_quick_logins_save():
 @app.route("/api/quick-logins/<item_id>", methods=["DELETE"])
 def api_quick_logins_delete(item_id: str):
     return jsonify(delete_quick_login(item_id))
+
+
+@app.route("/api/buy-items", methods=["GET"])
+def api_buy_items_get():
+    return jsonify({"ok": True, "items": load_buy_items()})
+
+
+@app.route("/api/buy-items", methods=["POST"])
+def api_buy_items_save():
+    body = request.get_json(silent=True) or {}
+    return _json_ok(upsert_buy_item(body))
+
+
+@app.route("/api/buy-items/<item_id>", methods=["DELETE"])
+def api_buy_items_delete(item_id: str):
+    return jsonify(delete_buy_item(item_id))
 
 
 @app.route("/api/packets", methods=["GET"])

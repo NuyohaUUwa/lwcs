@@ -14,6 +14,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 MONSTERS_FILE = os.path.join(DATA_DIR, "monsters.json")
 QUICK_LOGINS_FILE = os.path.join(DATA_DIR, "quick_logins.json")
+BUY_ITEMS_FILE = os.path.join(DATA_DIR, "buy_items.json")
 
 
 def _read_json_file(path: str, default):
@@ -125,4 +126,62 @@ def delete_quick_login(item_id: str):
     items = load_quick_logins()
     new_items = [x for x in items if x.get("id") != item_id]
     save_quick_logins(new_items)
+    return {"ok": True, "items": new_items}
+
+
+def load_buy_items():
+    data = _read_json_file(BUY_ITEMS_FILE, [])
+    items = data if isinstance(data, list) else []
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        code = str(item.get("code", "")).strip().lower()
+        if not name or len(code) != 22:
+            continue
+        try:
+            int(code, 16)
+        except ValueError:
+            continue
+        out.append({"id": code, "name": name, "code": code})
+    return out
+
+
+def save_buy_items(items):
+    _write_json_file(BUY_ITEMS_FILE, items)
+
+
+def upsert_buy_item(body: dict):
+    name = (body.get("name") or "").strip()
+    code = (body.get("code") or "").strip().lower()
+    if not name:
+        return {"ok": False, "error": "name 不能为空"}
+    if len(code) != 22:
+        return {"ok": False, "error": "code 必须是 22 位 hex"}
+    try:
+        int(code, 16)
+    except ValueError:
+        return {"ok": False, "error": "code 不是合法 hex"}
+
+    items = load_buy_items()
+    entry = {"id": code, "name": name, "code": code}
+    replaced = False
+    for i, old in enumerate(items):
+        if old.get("id") == code:
+            items[i] = entry
+            replaced = True
+            break
+    if not replaced:
+        items.append(entry)
+    items.sort(key=lambda x: x.get("name", ""))
+    save_buy_items(items)
+    return {"ok": True, "items": items, "saved_id": code}
+
+
+def delete_buy_item(item_id: str):
+    item_id = (item_id or "").strip().lower()
+    items = load_buy_items()
+    new_items = [x for x in items if x.get("id") != item_id]
+    save_buy_items(new_items)
     return {"ok": True, "items": new_items}

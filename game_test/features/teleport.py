@@ -1,28 +1,78 @@
 """
-地图传送功能（预留桩）。
-
-摸索流程：
-1. 在 main-000.py 中手动点击地图传送入口。
-2. 在测试应用"报文探测"面板中记录 UP 方向发出的报文，打标注如"传送到XX地图"。
-3. 对比不同目标地图的报文差异，找出地图 ID 的编码规律。
-4. 通过 POST /api/probe/send 验证后，填入下方模板实现 teleport() 函数。
+地图传送功能。
 """
 
-from core.session import get_session
+import json
+import os
+
+from utils.random_num import random_num_hex4
 
 
-def teleport(map_id: str = "") -> dict:
-    """
-    地图传送（占位）。
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+DESTINATIONS_FILE = os.path.join(BASE_DIR, "data", "teleport_destination.json")
+_TELEPORT_PACKET_TEMPLATE = "18000000e80303004428{random_num}f5054728000006000000{destination}0000"
 
-    Args:
-        map_id: 目标地图 ID（格式待通过 packet_probe 确认）
 
-    Returns:
-        {'ok': False, 'error': '功能待实现'}
-    """
-    session = get_session()
-    if not session.connected:
-        return {"ok": False, "error": "未连接游戏服"}
-    # TODO: 填入真实报文模板
-    return {"ok": False, "error": "传送功能待实现，请先通过 packet_probe 摸索报文格式"}
+def _load_destinations() -> dict[str, str]:
+    try:
+        with open(DESTINATIONS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    out: dict[str, str] = {}
+    for name, code in raw.items():
+        key = str(name or "").strip()
+        value = str(code or "").strip().lower()
+        if not key or len(value) != 8:
+            continue
+        try:
+            int(value, 16)
+        except ValueError:
+            continue
+        out[key] = value
+    return out
+
+
+def get_teleport_destinations() -> list[dict]:
+    destinations = _load_destinations()
+    return [{"name": name, "code": code} for name, code in destinations.items()]
+
+
+def _normalize_destination(destination: str) -> tuple[str, str]:
+    clean = str(destination or "").strip()
+    if not clean:
+        raise ValueError("destination 不能为空")
+
+    destinations = _load_destinations()
+    if clean in destinations:
+        return clean, destinations[clean]
+
+    code = clean.lower()
+    if len(code) != 8:
+        raise ValueError("地点编号必须是 8 位 hex，或传入 teleport_destination.json 中已配置的地点名称")
+    try:
+        int(code, 16)
+    except ValueError as e:
+        raise ValueError("地点编号不是合法 hex") from e
+
+    for name, mapped_code in destinations.items():
+        if mapped_code == code:
+            return name, code
+    return clean, code
+
+
+def build_teleport_packet(destination: str) -> dict:
+    destination_name, destination_code = _normalize_destination(destination)
+    random_num = random_num_hex4()
+    return {
+        "packet_hex": _TELEPORT_PACKET_TEMPLATE.format(
+            random_num=random_num,
+            destination=destination_code,
+        ),
+        "destination_name": destination_name,
+        "destination_code": destination_code,
+        "random_num": random_num,
+    }
