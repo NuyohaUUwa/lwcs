@@ -12,7 +12,6 @@
   - "2d000000e8030100fa0700000000..."  （疑似组队相关消息）
 """
 
-from core.connector import enqueue_packet
 from core.session import get_session
 
 

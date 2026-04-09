@@ -1,43 +1,154 @@
 """
-TCP 连接管理：建立连接、收包循环线程、带优先队列的发包工作线程。
+统一网络 I/O 入口。
+任何业务模块都只能通过本模块建立连接、发送报文、接收报文和启动运行时线程。
 """
 
+import binascii
+import queue
 import socket
 import threading
-import binascii
 import time
-import queue
 from typing import Callable, Optional
 
 from config import RECV_BUFSIZE, SEND_INTERVAL
+from core.session import get_session
 
 
-def connect(ip: str, port: int, timeout: float = 15.0) -> socket.socket:
-    """
-    建立 TCP 连接，返回 socket 对象。
-    失败抛出 ConnectionError。
-    """
+def _get_connected_socket() -> socket.socket:
+    session = get_session()
+    sock = session.sock
+    if not sock:
+        raise ConnectionError("socket 不可用")
+    return sock
+
+
+def open_connection(ip: str, port: int, timeout: float = 15.0) -> socket.socket:
+    """建立 TCP 连接并写入 session。"""
+    session = get_session()
+    close_connection()
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect((ip, port))
+        session.sock = sock
+        session.server_ip = ip
+        session.server_port = port
         return sock
     except Exception as e:
         raise ConnectionError(f"连接 {ip}:{port} 失败: {e}") from e
 
 
-def send_raw(sock: socket.socket, hex_str: str) -> int:
-    """
-    将 hex 字符串转为字节后通过 socket 发送。
-    返回实际发送字节数，失败抛出异常。
-    """
-    data = binascii.unhexlify(hex_str)
-    return sock.send(data)
+def close_connection():
+    """关闭当前连接。"""
+    session = get_session()
+    sock = session.sock
+    session.sock = None
+    if sock:
+        try:
+            sock.close()
+        except Exception:
+            pass
 
 
-def recv_once(sock: socket.socket, bufsize: int = RECV_BUFSIZE) -> bytes:
-    """单次阻塞接收，返回原始字节。"""
-    return sock.recv(bufsize)
+def send_packet(hex_str: str, priority: int = 10, use_queue: bool = True) -> int:
+    """
+    统一发包入口。
+    use_queue=True 时仅入队；否则立即发送并返回实际字节数。
+    """
+    session = get_session()
+    clean_hex = hex_str.lower().replace(" ", "")
+    if use_queue:
+        session.send_queue.put((priority, clean_hex))
+        return 0
+
+    data = binascii.unhexlify(clean_hex)
+    with session._send_lock:
+        sock = _get_connected_socket()
+        return sock.send(data)
+
+
+def send_and_receive_once(
+    packet_hex: str,
+    recv_timeout: float = 5.0,
+    bufsize: int = RECV_BUFSIZE,
+) -> bytes:
+    """在当前连接上发送一次并同步接收一次响应。"""
+    sock = _get_connected_socket()
+    old_timeout = sock.gettimeout()
+    try:
+        sock.settimeout(recv_timeout)
+        send_packet(packet_hex, use_queue=False)
+        return sock.recv(bufsize)
+    finally:
+        sock.settimeout(old_timeout)
+
+
+def connect_and_exchange(
+    ip: str,
+    port: int,
+    packet_hex: str,
+    *,
+    connect_timeout: float = 15.0,
+    recv_timeout: float = 5.0,
+    bufsize: int = RECV_BUFSIZE,
+    keep_open: bool = False,
+) -> bytes:
+    """
+    打开连接、发送一次、接收一次。
+    keep_open=True 时连接保留给后续流程；否则自动关闭。
+    """
+    sock = open_connection(ip, port, timeout=connect_timeout)
+    try:
+        old_timeout = sock.gettimeout()
+        sock.settimeout(recv_timeout)
+        send_packet(packet_hex, use_queue=False)
+        response = sock.recv(bufsize)
+        sock.settimeout(old_timeout)
+        if not keep_open:
+            close_connection()
+        return response
+    except Exception:
+        if not keep_open:
+            close_connection()
+        raise
+
+
+def start_connection_runtime(
+    on_packet: Callable[[bytes], None],
+    on_disconnect: Optional[Callable[[Exception], None]] = None,
+    *,
+    interval: float = SEND_INTERVAL,
+) -> dict:
+    """启动统一收包/发包线程。"""
+    session = get_session()
+    sock = _get_connected_socket()
+    stop_event = threading.Event()
+    session.connection_stop_event = stop_event
+
+    recv_thread = start_receive_loop(
+        sock=sock,
+        on_packet=on_packet,
+        on_error=on_disconnect,
+        stop_event=stop_event,
+    )
+    send_thread = start_send_worker(
+        send_queue=session.send_queue,
+        send_lock=session._send_lock,
+        stop_event=stop_event,
+        interval=interval,
+    )
+    session.recv_thread = recv_thread
+    session.send_thread = send_thread
+    return {"recv_thread": recv_thread, "send_thread": send_thread, "stop_event": stop_event}
+
+
+def stop_connection_runtime():
+    session = get_session()
+    stop_event = session.connection_stop_event
+    if stop_event:
+        stop_event.set()
+    close_connection()
+    session.clear_connection_runtime()
 
 
 def start_receive_loop(
@@ -46,29 +157,17 @@ def start_receive_loop(
     on_error: Optional[Callable[[Exception], None]] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> threading.Thread:
-    """
-    启动后台收包线程，持续 recv 并调用 on_packet。
-
-    Args:
-        sock:        已连接的 socket。
-        on_packet:   接收到数据时的回调 (bytes -> None)。
-        on_error:    发生异常时的回调（可选）。
-        stop_event:  外部通过此 Event 通知线程退出（可选）。
-
-    Returns:
-        已启动的 daemon 线程。
-    """
+    """启动后台收包线程。"""
     if stop_event is None:
         stop_event = threading.Event()
 
     def _loop():
-        sock.settimeout(1.0)  # 1 秒超时，便于检查 stop_event
+        sock.settimeout(1.0)
         try:
             while not stop_event.is_set():
                 try:
                     data = sock.recv(RECV_BUFSIZE)
                     if not data:
-                        # 服务器主动断开（EOF）
                         if not stop_event.is_set() and on_error:
                             on_error(ConnectionResetError("服务器主动断开连接"))
                         break
@@ -79,10 +178,8 @@ def start_receive_loop(
                 except socket.timeout:
                     continue
                 except socket.error as se:
-                    if not stop_event.is_set():
-                        print(f"[connector] socket 错误: {se}")
-                        if on_error:
-                            on_error(se)
+                    if not stop_event.is_set() and on_error:
+                        on_error(se)
                     break
         except Exception as e:
             if on_error:
@@ -94,34 +191,18 @@ def start_receive_loop(
                 pass
             stop_event.set()
 
-    t = threading.Thread(target=_loop, daemon=True, name="recv-loop")
-    t.start()
-    return t
+    thread = threading.Thread(target=_loop, daemon=True, name="recv-loop")
+    thread.start()
+    return thread
 
 
 def start_send_worker(
     send_queue: queue.PriorityQueue,
-    get_sock: Callable[[], Optional[socket.socket]],
     send_lock: threading.Lock,
     stop_event: Optional[threading.Event] = None,
     interval: float = SEND_INTERVAL,
 ) -> threading.Thread:
-    """
-    启动发送队列工作线程。
-
-    从 send_queue 取 (priority, hex_str) 元组，通过 get_sock() 获取当前 socket 发送。
-    每包间隔 interval 秒（节流）。
-
-    Args:
-        send_queue:  PriorityQueue，元素为 (priority: int, hex_str: str)。
-        get_sock:    返回当前活跃 socket（或 None）的可调用对象。
-        send_lock:   发送锁，防止并发写 socket。
-        stop_event:  外部停止信号。
-        interval:    每包间隔秒数。
-
-    Returns:
-        已启动的 daemon 线程。
-    """
+    """启动后台发包线程。"""
     if stop_event is None:
         stop_event = threading.Event()
 
@@ -132,30 +213,17 @@ def start_send_worker(
             except queue.Empty:
                 continue
 
-            sock = get_sock()
-            if not sock:
-                print("[connector] send_worker: socket 不可用，丢弃包")
-                send_queue.task_done()
-                continue
-
             try:
+                data = binascii.unhexlify(hex_str)
                 with send_lock:
-                    send_raw(sock, hex_str)
+                    sock = _get_connected_socket()
+                    sock.send(data)
                 time.sleep(interval)
             except Exception as e:
                 print(f"[connector] send_worker 发送失败: {e}")
             finally:
                 send_queue.task_done()
 
-    t = threading.Thread(target=_worker, daemon=True, name="send-worker")
-    t.start()
-    return t
-
-
-def enqueue_packet(
-    send_queue: queue.PriorityQueue,
-    hex_str: str,
-    priority: int = 10,
-):
-    """将 hex 报文加入发送队列。priority 越小越优先。"""
-    send_queue.put((priority, hex_str))
+    thread = threading.Thread(target=_worker, daemon=True, name="send-worker")
+    thread.start()
+    return thread

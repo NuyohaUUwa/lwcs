@@ -8,7 +8,6 @@
 4. 通过 POST /api/probe/send 验证后，填入下方模板实现 teleport() 函数。
 """
 
-from core.connector import enqueue_packet
 from core.session import get_session
 
 

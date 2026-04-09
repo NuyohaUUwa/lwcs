@@ -6,18 +6,15 @@
 4) 解析服务器战斗结束（df07）
 """
 
-import random
-import re
 import json
 import os
+import re
 import time
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
-from core.connector import enqueue_packet
 from core.session import get_session
 from features.role_stats import update_session_stats
-from features.packet_probe import record_packet
-from features.item_use import use_item
+from utils.random_num import random_num_hex4
 
 # 发起战斗模板：{seq} 为 4 位 hex，{monster} 为 4 位怪物代码
 _BATTLE_START_TEMPLATE = "1b000000e8030500f603{seq}f505fc030000090000000100{monster}0000000000"
@@ -179,7 +176,7 @@ def evaluate_auto_use(trigger: str = "") -> Dict[str, Any]:
         if now - float(last_ts.get(rule["id"], 0.0)) < 3.0:
             continue
 
-        res = use_item(item_id, 1)
+        res = use_auto_item(item_id)
         actions.append({
             "id": rule["id"],
             "ok": bool(res.get("ok")),
@@ -199,11 +196,6 @@ def evaluate_auto_use(trigger: str = "") -> Dict[str, Any]:
     if actions:
         session._notify_sse("auto_use", {"trigger": trigger, "actions": actions})
     return {"ok": True, "trigger": trigger, "actions": actions}
-
-
-def _random_num_hex4() -> str:
-    """等价 Kotlin: Random.nextInt(0x0000, 0xFFFF).toString(16).padStart(4, '0')"""
-    return format(random.randint(0x0000, 0xFFFF), "04x")
 
 
 def _decode_utf8_text(packet_hex: str) -> str:
@@ -257,58 +249,23 @@ def _parse_gold_to_copper(text: str):
     return jin * 1000 * 1000 + yin * 1000 + tong
 
 
-def start_battle(monster_code: str) -> Dict:
-    """发起战斗：构造 f603 报文并入发送队列。"""
-    session = get_session()
-    if not session.connected:
-        return {"ok": False, "error": "未连接游戏服"}
-    try:
-        monster = _normalize_hex4(monster_code, "monster_code")
-    except ValueError as e:
-        return {"ok": False, "error": str(e)}
-
-    random_num = _random_num_hex4()
-    packet_hex = _BATTLE_START_TEMPLATE.format(seq=random_num, monster=monster)
-    enqueue_packet(session.send_queue, packet_hex, priority=10)
-    record_packet(packet_hex, "UP")
-    # 标记进入战斗流程（用于“未秒杀包”触发重发）
-    with session._lock:
-        session.battle_in_progress = True
-        session.battle_last_retry_ts = 0.0
+def build_start_battle_packet(monster_code: str) -> Dict:
+    """构造发起战斗报文。"""
+    monster = _normalize_hex4(monster_code, "monster_code")
+    random_num = random_num_hex4()
     return {
-        "ok": True,
-        "queued": 1,
+        "packet_hex": _BATTLE_START_TEMPLATE.format(seq=random_num, monster=monster),
         "monster_code": monster,
         "random_num": random_num,
-        "packet_hex": packet_hex,
     }
 
 
-def do_battle() -> Dict:
-    """进行战斗：发送群体技能包 f703（包含随机 random_num）。"""
-    session = get_session()
-    if not session.connected:
-        return {"ok": False, "error": "未连接游戏服"}
-    random_num = _random_num_hex4()
-    packet_hex = _BATTLE_SKILL_PACKET_TEMPLATE.format(random_num=random_num)
-    enqueue_packet(session.send_queue, packet_hex, priority=10)
-    record_packet(packet_hex, "UP")
-    return {"ok": True, "queued": 1, "packet_hex": packet_hex, "random_num": random_num}
-
-
-def one_shot_kill(monster_code: str) -> Dict:
-    """秒杀流程：先发起战斗，再立即发送战斗技能。"""
-    start = start_battle(monster_code)
-    if not start.get("ok"):
-        return start
-    fight = do_battle()
-    if not fight.get("ok"):
-        return fight
+def build_do_battle_packet() -> Dict:
+    """构造进行战斗报文。"""
+    random_num = random_num_hex4()
     return {
-        "ok": True,
-        "queued": 2,
-        "monster_code": start.get("monster_code"),
-        "random_num": start.get("random_num"),
+        "packet_hex": _BATTLE_SKILL_PACKET_TEMPLATE.format(random_num=random_num),
+        "random_num": random_num,
     }
 
 
@@ -357,3 +314,16 @@ def parse_battle_end(packet_hex: str) -> Dict:
     else:
         session._notify_sse("battle_not_killed", payload)
     return payload
+
+
+def mark_battle_started():
+    session = get_session()
+    with session._lock:
+        session.battle_in_progress = True
+        session.battle_last_retry_ts = 0.0
+
+
+def use_auto_item(item_id: str) -> Dict[str, Any]:
+    from services.action_manager import send_action
+
+    return send_action("item.use", {"item_id": item_id, "quantity": 1})

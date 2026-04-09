@@ -1,23 +1,21 @@
 """
 报文探测模块：
 - 记录全量收发报文（PacketRecord）
-- 自动解析：已知指纹 → 详细字段；通用帧头 → command + UTF-8 文本；无法解析 → None
+- 自动解析：已知指纹 -> 详细字段；通用帧头 -> command + UTF-8 文本；无法解析 -> None
 - 指纹描述表：内置 + 用户新增，统一持久化到 data/fingerprints.json
-  "标注"与"指纹"概念统一：为某条报文添加描述 = 为其指纹注册描述，自动应用于所有同指纹报文
-- 自定义发包：直接通过 socket 或发送队列发出（用于摸索新功能）
+- 自定义发包通过 action_manager 统一发送
 """
 
 import json
 import os
 import time
 import threading
-import struct
 import binascii
+import struct
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, Any
 
 from core.codec import extract_utf8_segments, extract_packet_fingerprint
-from core.connector import enqueue_packet, send_raw
 from core.session import get_session
 
 # ------------------------------------------------------------------ #
@@ -277,27 +275,16 @@ def send_probe_packet(hex_str: str, use_queue: bool = True, priority: int = 10) 
     Returns:
         {'ok': True, 'hex': '...'}  或  {'ok': False, 'error': '...'}
     """
-    session = get_session()
-    if not session.connected or not session.sock:
-        return {"ok": False, "error": "未连接游戏服"}
-
     clean_hex = hex_str.replace(" ", "").replace("\n", "").lower()
-
     if len(clean_hex) % 2 != 0:
         return {"ok": False, "error": "hex 长度必须为偶数"}
     try:
         binascii.unhexlify(clean_hex)
     except binascii.Error as e:
         return {"ok": False, "error": f"hex 格式错误: {e}"}
+    from services.action_manager import send_raw_action
 
-    record_packet(clean_hex, "UP")
-
-    try:
-        if use_queue:
-            enqueue_packet(session.send_queue, clean_hex, priority=priority)
-            return {"ok": True, "hex": clean_hex, "method": "queue"}
-        else:
-            sent = send_raw(session.sock, clean_hex)
-            return {"ok": True, "hex": clean_hex, "sent_bytes": sent, "method": "direct"}
-    except Exception as e:
-        return {"ok": False, "error": f"发包失败: {e}"}
+    result = send_raw_action(clean_hex, priority=priority, use_queue=use_queue)
+    if result.get("ok"):
+        result["hex"] = clean_hex
+    return result
