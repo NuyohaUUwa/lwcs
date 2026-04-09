@@ -454,8 +454,17 @@
           <span class="text-muted">启动延时(ms)：</span>
           <input type="text" id="battle-loop-delay" value="1900" style="width:90px; padding:4px 8px; font-size:12px;">
           <button id="btn-battle-loop" class="btn btn-success btn-sm" onclick="toggleBattleLoop()">开始循环战斗</button>
-          <button class="btn btn-ghost btn-sm" onclick="triggerBattleOnce()">手动单次</button>
+          <button class="btn btn-ghost btn-sm" onclick="triggerBattleOnce(true)">手动单次</button>
           <span class="text-muted" id="battle-stats">次数: 0 / 经验: - / 金币: -</span>
+        </div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">自动使用物品（后端执行）</div>
+        <div id="auto-use-list" class="text-muted text-sm">加载中...</div>
+        <div class="battle-row mt-8">
+          <button class="btn btn-primary btn-sm" onclick="saveAutoUseRules()">保存配置</button>
+          <button class="btn btn-ghost btn-sm" onclick="loadAutoUseRules()">刷新</button>
         </div>
       </div>
 
@@ -567,6 +576,8 @@ let de07RetryCount = 0;       // 当前轮 f603 超时重试次数
 let f703WatchTimer = null;    // 等待 f703 结果超时定时器
 let battleRecoveryInProgress = false;
 let battleLogMode = 'simple'; // simple | detail
+let autoUseRules = [];
+let battleManualSingle = false; // 当前轮是否为手动单次
 
 // ================================================================== //
 //  工具函数                                                            //
@@ -621,6 +632,7 @@ function startSSE() {
       else if (msg.type === 'battle_response') onBattleResponse(msg.data);
       else if (msg.type === 'battle_end') onBattleEnd(msg.data);
       else if (msg.type === 'battle_not_killed') onBattleNotKilled(msg.data);
+      else if (msg.type === 'auto_use') onAutoUseEvent(msg.data);
       else if (msg.type === 'monsters') renderMonsterList(msg.data);
     } catch (_) {}
   };
@@ -1090,6 +1102,53 @@ async function loadMonsters() {
   if (res && res.ok) renderMonsterList(res.monsters || []);
 }
 
+async function loadAutoUseRules() {
+  const res = await api('GET', '/api/auto-use/config').catch(() => null);
+  if (!res || !res.ok) return;
+  autoUseRules = Array.isArray(res.rules) ? res.rules : [];
+  renderAutoUseRules();
+}
+
+function renderAutoUseRules() {
+  const box = document.getElementById('auto-use-list');
+  if (!box) return;
+  if (!autoUseRules.length) {
+    box.innerHTML = '<div class="text-muted text-sm">暂无配置</div>';
+    return;
+  }
+  box.innerHTML = autoUseRules.map((r, i) => `
+    <div style="border:1px solid var(--border); border-radius:6px; padding:8px; margin-bottom:6px;">
+      <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+        <input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="autoUseRules[${i}].enabled=this.checked">
+        <span>${escHtml(r.label || r.id)}</span>
+      </label>
+      <div class="battle-row">
+        <span class="text-muted">阈值:</span>
+        <input type="text" value="${escAttr(String(r.threshold ?? ''))}" style="width:70px; padding:3px 6px;"
+          onchange="autoUseRules[${i}].threshold=Number(this.value||0)">
+        <span class="text-muted">物品名:</span>
+        <input type="text" value="${escAttr(r.item_name || '')}" style="width:180px; padding:3px 6px;"
+          onchange="autoUseRules[${i}].item_name=this.value">
+        <span class="text-muted">代码:</span>
+        <input type="text" value="${escAttr(r.item_id || '')}" style="width:150px; padding:3px 6px;"
+          onchange="autoUseRules[${i}].item_id=this.value.toLowerCase()">
+      </div>
+      <div class="text-muted text-sm mt-8">条件：${escHtml(r.stat_key || '')} < ${escHtml(String(r.threshold ?? ''))}</div>
+    </div>
+  `).join('');
+}
+
+async function saveAutoUseRules() {
+  const res = await api('PUT', '/api/auto-use/config', { rules: autoUseRules });
+  if (res && res.ok) {
+    autoUseRules = res.rules || [];
+    renderAutoUseRules();
+    appendBattleLog({ raw_text: '自动使用配置已保存' }, 'response');
+  } else {
+    appendBattleLog({ raw_text: `自动使用配置保存失败: ${res?.error || '未知错误'}` }, 'end');
+  }
+}
+
 function renderMonsterList(monsters) {
   battleMonsters = Array.isArray(monsters) ? monsters : [];
   const box = document.getElementById('battle-monster-list');
@@ -1230,6 +1289,7 @@ function onBattleEnd(data) {
   updateBattleStatsText();
   battleNextPending = false;
   battleAwaiting = 'idle';
+  battleManualSingle = false;
   if (battleLoopRunning) {
     battleRoundIndex += 1;
     const waitMs = battleRoundIndex >= 1 ? getBattleLoopDelayMs() : 0;
@@ -1282,8 +1342,9 @@ function formatGoldFromCopper(copper) {
   return `${tong}金${yin}银${jin}铜`;
 }
 
-async function triggerBattleOnce() {
+async function triggerBattleOnce(isManual = false) {
   if (!selectedMonsterCode || battleNextPending || battleAwaiting !== 'idle') return;
+  battleManualSingle = !!isManual;
   appendBattleLog({ raw_text: '战斗开始' }, 'response');
   battleNextPending = true;
   // 第一步：仅发起战斗 f603，收到 de07 后才发 f703
@@ -1303,6 +1364,7 @@ function toggleBattleLoop() {
   battleLoopRunning = !battleLoopRunning;
   const btn = document.getElementById('btn-battle-loop');
   if (battleLoopRunning) {
+    battleManualSingle = false;
     // 新一轮循环战斗前重置累计
     battleCount = 0;
     totalBattleExp = 0;
@@ -1342,6 +1404,7 @@ function stopBattleLoopWithReason(reason) {
   if (de07WatchTimer) { clearTimeout(de07WatchTimer); de07WatchTimer = null; }
   if (f703WatchTimer) { clearTimeout(f703WatchTimer); f703WatchTimer = null; }
   de07RetryCount = 0;
+  battleManualSingle = false;
   const btn = document.getElementById('btn-battle-loop');
   if (btn) {
     btn.textContent = '开始循环战斗';
@@ -1387,6 +1450,10 @@ function startF703Watch() {
   f703WatchTimer = setTimeout(async () => {
     f703WatchTimer = null;
     if (battleAwaiting !== 'waiting_result') return;
+    if (battleManualSingle) {
+      stopBattleLoopWithReason('等待 f703 响应超时：手动单次不重试');
+      return;
+    }
     appendBattleLog({ raw_text: '等待 f703 响应超时，改为重发 f603...' }, 'response');
     await restartBattleByF603('重发 f603 失败');
   }, 2000);
@@ -1404,6 +1471,10 @@ async function sendBattleDoWithDelay() {
     startF703Watch();
   } else {
     appendBattleLog({ raw_text: `发送 f703 失败: ${res.error || '未知错误'}` }, 'end');
+    if (battleManualSingle) {
+      stopBattleLoopWithReason('手动单次发送 f703 失败：不重试');
+      return;
+    }
     await restartBattleByF603('f703 失败后重发 f603 失败');
   }
 }
@@ -1423,6 +1494,10 @@ function startDe07Watch() {
 }
 
 async function restartBattleByF603(errorPrefix) {
+  if (battleManualSingle) {
+    stopBattleLoopWithReason(`${errorPrefix}：手动单次不重试`);
+    return false;
+  }
   battleAwaiting = 'idle';
   battleNextPending = false;
   de07RetryCount = 0;
@@ -1452,6 +1527,15 @@ function onBattleLogModeChange() {
   box.querySelectorAll('.battle-log-item[data-kind="packet"]').forEach((el) => {
     el.style.display = (battleLogMode === 'detail') ? '' : 'none';
   });
+}
+
+function onAutoUseEvent(data) {
+  if (!data || !Array.isArray(data.actions) || !data.actions.length) return;
+  const lines = data.actions.map(a => {
+    if (a.ok) return `[自动使用] ${a.item_name || a.item_id} 已使用`;
+    return `[自动使用] ${a.item_name || a.item_id} 失败: ${a.reason || a.error || '未知错误'}`;
+  });
+  appendBattleLog({ raw_text: lines.join(' / ') }, 'response');
 }
 
 // SSE 收到世界频道消息
@@ -1880,6 +1964,7 @@ function toggleCollapseMode() {
     }
   }
   loadMonsters();
+  loadAutoUseRules();
   loadQuickLogins();
   updateBattleStatsText();
 })();

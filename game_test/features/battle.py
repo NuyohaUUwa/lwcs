@@ -10,19 +10,21 @@ import random
 import re
 import json
 import os
-from typing import Dict
+import time
+from typing import Dict, List, Any
 
 from core.connector import enqueue_packet
 from core.session import get_session
 from features.role_stats import update_session_stats
 from features.packet_probe import record_packet
+from features.item_use import use_item
 
 # 发起战斗模板：{seq} 为 4 位 hex，{monster} 为 4 位怪物代码
 _BATTLE_START_TEMPLATE = "1b000000e8030500f603{seq}f505fc030000090000000100{monster}0000000000"
 
 # 进行战斗（群体技能）包
 _BATTLE_SKILL_PACKET_TEMPLATE = (
-    "22000000e8030500f703{random_num}f505040400001000000001000300000000000000030001020000"
+    "22000000e8030500f703{random_num}f50504040000100000000100cb00000000000000030001020000"
 )
 
 def _load_default_monsters() -> list:
@@ -44,11 +46,10 @@ def _load_default_monsters() -> list:
                         out.append({"name": name, "code": code})
                     except ValueError:
                         continue
-            if out:
-                return out
+            return out
     except Exception:
         pass
-    return [{"name": "示例怪物", "code": "f005"}]
+    return []
 
 
 # 默认怪物列表（优先来自 JSON，前端可增删）
@@ -58,6 +59,7 @@ _BATTLE_END_HEX_TOKENS = (
     "e88eb7e5be97e98791e5b8813a20",    # 获得金币: (半角冒号+空格)
 )
 _NEILI_NOT_ENOUGH_HEX_TOKEN = "e58685e58a9be4b88de8b6b3"  # 内力不足
+AUTO_USE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "auto_use_rules.json")
 
 
 def _normalize_hex4(value: str, name: str) -> str:
@@ -69,6 +71,134 @@ def _normalize_hex4(value: str, name: str) -> str:
     except ValueError as e:
         raise ValueError(f"{name} 不是合法 hex") from e
     return v
+
+
+def _to_int(v) -> int:
+    s = str(v or "").strip()
+    m = re.search(r"-?\d+", s)
+    return int(m.group(0)) if m else 0
+
+
+def _normalize_auto_use_rule(rule: Dict[str, Any]) -> Dict[str, Any]:
+    rid = str(rule.get("id", "")).strip()
+    return {
+        "id": rid,
+        "label": str(rule.get("label", rid)),
+        "enabled": bool(rule.get("enabled", False)),
+        "stat_key": str(rule.get("stat_key", "")),
+        "threshold": int(rule.get("threshold", 0)),
+        "item_name": str(rule.get("item_name", "")),
+        "item_id": str(rule.get("item_id", "")).strip().lower(),
+    }
+
+
+def _load_auto_use_rules() -> List[Dict[str, Any]]:
+    try:
+        with open(AUTO_USE_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, list):
+            raise ValueError("rules must be list")
+    except Exception:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id", "")).strip()
+        if not rid:
+            continue
+        out.append(_normalize_auto_use_rule(r))
+    return out
+
+
+def _save_auto_use_rules(rules: List[Dict[str, Any]]) -> None:
+    with open(AUTO_USE_FILE, "w", encoding="utf-8") as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+
+
+def get_auto_use_rules() -> List[Dict[str, Any]]:
+    session = get_session()
+    with session._lock:
+        rules = getattr(session, "auto_use_rules", None)
+        if rules is None:
+            rules = _load_auto_use_rules()
+            session.auto_use_rules = rules
+            session.auto_use_last_ts = {}
+        return [dict(x) for x in rules]
+
+
+def set_auto_use_rules(updated_rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    new_rules: List[Dict[str, Any]] = []
+    for r in updated_rules:
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id", "")).strip()
+        if not rid:
+            continue
+        new_rules.append(_normalize_auto_use_rule(r))
+
+    session = get_session()
+    with session._lock:
+        session.auto_use_rules = new_rules
+        if not hasattr(session, "auto_use_last_ts"):
+            session.auto_use_last_ts = {}
+    _save_auto_use_rules(new_rules)
+    return [dict(x) for x in new_rules]
+
+
+def evaluate_auto_use(trigger: str = "") -> Dict[str, Any]:
+    session = get_session()
+    if not session.connected:
+        return {"ok": False, "error": "未连接"}
+
+    with session._lock:
+        rules = [dict(x) for x in getattr(session, "auto_use_rules", _load_auto_use_rules())]
+        session.auto_use_rules = rules
+        stats = dict(session.role_stats)
+        items = {k: v.to_dict() for k, v in session.backpack_items.items()}
+        last_ts = dict(getattr(session, "auto_use_last_ts", {}))
+
+    now = time.time()
+    actions = []
+    for rule in rules:
+        if not rule.get("enabled"):
+            continue
+        item_id = str(rule.get("item_id", "")).strip().lower()
+        if not item_id:
+            continue
+        stat_key = rule.get("stat_key", "")
+        threshold = int(rule.get("threshold", 0))
+        stat_val = _to_int(stats.get(stat_key, 0))
+        if stat_val >= threshold:
+            continue
+        item = items.get(item_id)
+        if not item or int(item.get("quantity", 0)) <= 0:
+            actions.append({"id": rule["id"], "ok": False, "reason": "背包无可用物品"})
+            continue
+        if now - float(last_ts.get(rule["id"], 0.0)) < 3.0:
+            continue
+
+        res = use_item(item_id, 1)
+        actions.append({
+            "id": rule["id"],
+            "ok": bool(res.get("ok")),
+            "item_id": item_id,
+            "item_name": rule.get("item_name", ""),
+            "stat_key": stat_key,
+            "stat_value": stat_val,
+            "threshold": threshold,
+            "error": res.get("error"),
+        })
+        if res.get("ok"):
+            last_ts[rule["id"]] = now
+
+    with session._lock:
+        session.auto_use_last_ts = last_ts
+
+    if actions:
+        session._notify_sse("auto_use", {"trigger": trigger, "actions": actions})
+    return {"ok": True, "trigger": trigger, "actions": actions}
 
 
 def _random_num_hex4() -> str:

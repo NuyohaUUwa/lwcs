@@ -33,6 +33,9 @@ from features.battle import (
     one_shot_kill,
     parse_battle_response,
     parse_battle_end,
+    get_auto_use_rules,
+    set_auto_use_rules,
+    evaluate_auto_use,
 )
 
 app = Flask(__name__, static_folder=None)
@@ -70,6 +73,10 @@ def dispatch_packet(raw_bytes: bytes):
             update_session_stats(hex_str)
         except Exception as e:
             print(f"[server] 角色属性解析异常: {e}")
+        try:
+            evaluate_auto_use("d607")
+        except Exception as e:
+            print(f"[server] 自动使用检查异常: {e}")
     elif "de07" in hex_str[8:20]:
         try:
             parse_battle_response(hex_str)
@@ -80,6 +87,10 @@ def dispatch_packet(raw_bytes: bytes):
             parse_battle_end(hex_str)
         except Exception as e:
             print(f"[server] 战斗结束解析异常: {e}")
+        try:
+            evaluate_auto_use("df07")
+        except Exception as e:
+            print(f"[server] 自动使用检查异常: {e}")
     else:
         try:
             dispatch_backpack_packet(hex_str)
@@ -414,6 +425,21 @@ def api_battle_monsters_delete(code: str):
         return jsonify({"ok": False, "error": "怪物代码不存在"}), 404
     _save_monsters(new_list)
     return jsonify({"ok": True, "monsters": new_list})
+
+
+@app.route("/api/auto-use/config", methods=["GET"])
+def api_auto_use_get():
+    return jsonify({"ok": True, "rules": get_auto_use_rules()})
+
+
+@app.route("/api/auto-use/config", methods=["PUT"])
+def api_auto_use_put():
+    body = request.get_json(silent=True) or {}
+    rules = body.get("rules", [])
+    if not isinstance(rules, list):
+        return jsonify({"ok": False, "error": "rules 必须是数组"}), 400
+    saved = set_auto_use_rules(rules)
+    return jsonify({"ok": True, "rules": saved})
 
 
 @app.route("/api/quick-logins", methods=["GET"])
