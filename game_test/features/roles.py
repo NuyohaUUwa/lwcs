@@ -6,8 +6,21 @@
 import re
 from typing import Any, Dict
 
+from utils.random_num import random_num_hex4
 
-ENTER_GAME_EXTRA_PACKET = "21000000e8030a000904cf07f605150400000f000000000000000000000400333432330000"
+ENTER_GAME_EXTRA_PACKET_TEMPLATE = (
+    "24000000e80303003d28{random_1}f6054c28000012000000000000000000000000000000000000000000"
+    "14000000e80317000d30{random_2}f6050c300000020000000a00"
+    "12000000e80302000504{random_3}f5050204000000000000"
+)
+
+
+def build_enter_game_extra_packet() -> str:
+    return ENTER_GAME_EXTRA_PACKET_TEMPLATE.format(
+        random_1=random_num_hex4(),
+        random_2=random_num_hex4(),
+        random_3=random_num_hex4(),
+    )
 
 
 def build_role_list_packet(session_id: str, server_ip: str, server_port: int) -> str:

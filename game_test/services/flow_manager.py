@@ -15,7 +15,7 @@ from features.login import build_login_packet, parse_login_response
 from features.packet_probe import record_packet
 from features.role_stats import update_session_stats
 from features.roles import (
-    ENTER_GAME_EXTRA_PACKET,
+    build_enter_game_extra_packet,
     build_role_list_packet,
     build_select_role_packet,
     parse_role_data,
@@ -181,7 +181,7 @@ def select_role_flow(role_id: str) -> dict:
 
         handle_incoming_packet(select_res["response_bytes"])
 
-        extra_res = send_raw_action(ENTER_GAME_EXTRA_PACKET, priority=10, use_queue=False)
+        extra_res = send_raw_action(build_enter_game_extra_packet(), priority=10, use_queue=False)
         if not extra_res.get("ok"):
             return extra_res
 
