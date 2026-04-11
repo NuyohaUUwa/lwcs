@@ -127,12 +127,11 @@ def cancel_pending_reconnect(reason: str = "") -> dict:
     return {"ok": True, "control_state": session.get_control_state()}
 
 
-def _schedule_reconnect(reason: str, *, immediate: bool = False, force: bool = False, delay_s: float | None = None):
+def _schedule_reconnect(reason: str, *, immediate: bool = False, delay_s: float | None = None):
     ensure_control_worker_running()
     session = get_session()
     with session._lock:
-        should_reconnect = force or session.battle_loop_running or session.auto_reconnect_enabled
-        if not should_reconnect:
+        if not session.auto_reconnect_enabled:
             return False
         if not _has_reconnect_context(session):
             _emit_control_log("缺少后端重连上下文，无法自动恢复", level="warn")
@@ -156,7 +155,7 @@ def _schedule_reconnect(reason: str, *, immediate: bool = False, force: bool = F
 
 
 def _should_keep_reconnecting(session) -> bool:
-    return bool(session.battle_loop_running or session.auto_reconnect_enabled)
+    return bool(session.auto_reconnect_enabled)
 
 
 def _get_retry_delay_s(attempts: int) -> float:
@@ -248,7 +247,7 @@ def _control_worker_tick(now: float) -> None:
     if control_state.get("reconnect_state") in ("scheduled", "banned_wait"):
         next_retry_ts = float(control_state.get("reconnect_next_retry_ts") or 0.0)
         if not _should_keep_reconnecting(session):
-            cancel_pending_reconnect("后端检测到循环战斗已停止，取消自动重连")
+            cancel_pending_reconnect("后端检测到未开启自动重连，取消重连任务")
             control_state = session.get_control_state()
             next_retry_ts = 0.0
         if next_retry_ts > 0 and now >= next_retry_ts and not session.connected:
@@ -297,8 +296,8 @@ def _control_worker_tick(now: float) -> None:
                 )
                 if session.connected:
                     _default_disconnect_handler(Exception(error))
-                else:
-                    _schedule_reconnect(error, immediate=True, force=True)
+                elif session.auto_reconnect_enabled:
+                    _schedule_reconnect(error, immediate=True)
 
 
 def _control_worker_loop():
@@ -364,8 +363,8 @@ def _default_disconnect_handler(error: Exception):
     stop_connection_runtime()
     session.clear_connection_runtime()
     session.notify_status_change()
-    if preserve_loop or session.auto_reconnect_enabled:
-        if _schedule_reconnect(str(error), immediate=True, force=preserve_loop):
+    if session.auto_reconnect_enabled:
+        if _schedule_reconnect(str(error), immediate=True):
             _emit_control_log(f"连接断开：{error}；后端将自动恢复", level="warn", scope="reconnect")
 
 
@@ -557,9 +556,16 @@ def disconnect_flow() -> dict:
         stop_connection_runtime()
         session.clear_connection_runtime()
         session.notify_status_change()
-        _schedule_reconnect("循环战斗中手动断开，保持循环并自动重连", immediate=True, force=True)
-        _emit_control_log("循环战斗中手动断开：后端保持循环并开始重连", level="warn", scope="reconnect")
-        return {"ok": True, "message": "已断开连接，循环战斗保持开启，后端将自动重连"}
+        if session.auto_reconnect_enabled:
+            _schedule_reconnect("循环战斗中手动断开，保持循环并自动重连", immediate=True)
+            _emit_control_log("循环战斗中手动断开：后端保持循环并将自动重连", level="warn", scope="reconnect")
+            return {"ok": True, "message": "已断开连接，循环战斗保持开启，后端将自动重连"}
+        _emit_control_log(
+            "循环战斗中手动断开：循环意图已保留，未开启自动重连故不会自动重连",
+            level="info",
+            scope="battle",
+        )
+        return {"ok": True, "message": "已断开连接，循环战斗保持开启（未开启自动重连，不会自动重连）"}
     reset_battle_state()
     session.reset()
     return {"ok": True, "message": "已断开连接"}

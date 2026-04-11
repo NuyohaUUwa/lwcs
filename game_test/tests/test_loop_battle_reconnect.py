@@ -61,11 +61,12 @@ class LoopBattleReconnectTests(unittest.TestCase):
             session.battle_last_response_ts = 0.0
         self.assertTrue(battle.is_battle_wait_timed_out(now))
 
-    def test_disconnect_handler_keeps_loop_and_schedules_reconnect(self):
+    def test_disconnect_handler_keeps_loop_without_auto_does_not_schedule_reconnect(self):
         session = get_session()
         with session._lock:
             session.connected = True
             session.connection_status = "connected"
+            session.auto_reconnect_enabled = False
             session.battle_mode = "loop"
             session.battle_loop_running = True
             session.battle_loop_monster_code = "0001"
@@ -78,6 +79,25 @@ class LoopBattleReconnectTests(unittest.TestCase):
         self.assertFalse(session.connected)
         self.assertTrue(session.battle_loop_running)
         self.assertEqual(session.battle_mode, "loop")
+        schedule_reconnect.assert_not_called()
+
+    def test_disconnect_handler_schedules_reconnect_only_when_auto_enabled(self):
+        session = get_session()
+        with session._lock:
+            session.connected = True
+            session.connection_status = "connected"
+            session.auto_reconnect_enabled = True
+            session.battle_mode = "loop"
+            session.battle_loop_running = True
+            session.battle_loop_monster_code = "0001"
+
+        with patch("services.flow_manager.stop_connection_runtime"), patch(
+            "services.flow_manager._schedule_reconnect", return_value=True
+        ) as schedule_reconnect:
+            flow_manager._default_disconnect_handler(Exception("boom"))
+
+        self.assertFalse(session.connected)
+        self.assertTrue(session.battle_loop_running)
         schedule_reconnect.assert_called_once()
 
     def test_control_worker_next_round_uses_loop_round_starter(self):
