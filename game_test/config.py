@@ -23,7 +23,7 @@ API_DEBUG = False
 PACKET_LOG_MAX = 500
 
 # 发送队列每包间隔（秒）
-SEND_INTERVAL = 0.6
+SEND_INTERVAL = 1
 
 # 接收缓冲区大小
 RECV_BUFSIZE = 14048

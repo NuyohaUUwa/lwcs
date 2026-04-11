@@ -95,7 +95,7 @@ class LoopBattleReconnectTests(unittest.TestCase):
         with patch("services.flow_manager.start_loop_battle_round", return_value={"ok": True}) as start_round:
             flow_manager._control_worker_tick(now)
 
-        start_round.assert_called_once_with("0001", run_pre_battle_actions=False)
+        start_round.assert_called_once_with("0001", run_pre_battle_actions=True)
         self.assertTrue(session.battle_loop_running)
 
     def test_control_worker_resumes_loop_after_reconnect_from_idle_state(self):
@@ -114,7 +114,7 @@ class LoopBattleReconnectTests(unittest.TestCase):
         with patch("services.flow_manager.start_loop_battle_round", return_value={"ok": True}) as start_round:
             flow_manager._control_worker_tick(now)
 
-        start_round.assert_called_once_with("0001", run_pre_battle_actions=False)
+        start_round.assert_called_once_with("0001", run_pre_battle_actions=True)
         self.assertTrue(session.battle_loop_running)
 
     def test_reconnect_fail_after_three_attempts_keeps_loop_intent(self):

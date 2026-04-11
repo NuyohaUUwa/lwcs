@@ -1184,7 +1184,9 @@ function handleWorldChat(parsed) {
 // ================================================================== //
 //  报文探测                                                            //
 // ================================================================== //
-const MAX_PACKET_ROWS = 200;  // 前端最多保留 200 条
+const MAX_PACKET_ROWS = 1000;  // 前端最多保留 1000 条
+/** 判定「贴在顶部」：此时顶部插入新报文允许自然跟随最新，不补偿 scrollTop */
+const PACKET_LIST_TOP_EPS = 2;
 let currentAutoExpandedDetailId = null;
 
 function sortPacketsNewestFirst(records) {
@@ -1261,15 +1263,33 @@ function buildPacketRow(record, collapseCount = 0, openByDefault = false) {
 
 function insertPacketRowAtTop(row) {
   const list = document.getElementById('packet-list');
+  if (!list) return;
   if (currentAutoExpandedDetailId) {
     const prev = document.getElementById(currentAutoExpandedDetailId);
     if (prev) prev.classList.remove('open');
   }
+
+  const scrollTopBefore = list.scrollTop;
+  const scrollHeightBefore = list.scrollHeight;
+  const stickToTop = scrollTopBefore <= PACKET_LIST_TOP_EPS;
+
   list.insertBefore(row, list.firstChild);
+
+  if (!stickToTop) {
+    const delta = list.scrollHeight - scrollHeightBefore;
+    list.scrollTop = scrollTopBefore + delta;
+  }
+
   const opened = row.querySelector('.pkt-detail.open');
   currentAutoExpandedDetailId = opened ? opened.id : null;
+
   while (list.children.length > MAX_PACKET_ROWS) {
     list.removeChild(list.lastChild);
+  }
+
+  const maxScroll = Math.max(0, list.scrollHeight - list.clientHeight);
+  if (list.scrollTop > maxScroll) {
+    list.scrollTop = maxScroll;
   }
 }
 

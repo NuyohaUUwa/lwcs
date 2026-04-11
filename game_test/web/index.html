@@ -175,7 +175,12 @@
   #probe-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   #probe-filters label { color: var(--text2); font-size: 11px; }
   #probe-filters select, #probe-filters input { width: auto; padding: 4px 8px; font-size: 12px; }
-  #packet-list { flex: 1; overflow-y: auto; min-height: 0; }
+  #packet-list {
+    flex: 1;
+    min-height: 200px;
+    max-height: min(82vh, 960px);
+    overflow-y: auto;
+  }
   .packet-row {
     border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px;
     overflow: hidden; transition: border-color 0.15s;
@@ -215,12 +220,12 @@
     font-family: monospace; font-size: 11px; color: var(--text2);
     word-break: break-all; background: var(--surface2);
     padding: 6px 42px 6px 6px; border-radius: 4px;
-    max-height: 100px; overflow-y: auto;
+    max-height: min(42vh, 360px); overflow-y: auto;
   }
   .pkt-utf8 {
     font-size: 12px; color: var(--text); background: var(--surface2);
     padding: 6px; border-radius: 4px; margin-bottom: 8px;
-    word-break: break-word; max-height: 80px; overflow-y: auto;
+    word-break: break-word; max-height: min(28vh, 240px); overflow-y: auto;
   }
   .pkt-utf8 .cn-text { color: #ffd77a; }
   .pkt-fields { font-size: 11px; color: var(--text2); margin-bottom: 8px; }
@@ -307,7 +312,7 @@
   .mono { font-family: monospace; }
   .battle-box { border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: var(--surface2); margin-bottom: 10px; }
   .battle-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .battle-log { min-height: 220px; max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); padding: 8px; }
+  .battle-log { min-height: 220px; max-height: 820px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); padding: 8px; }
   .battle-log-item { font-size: 12px; margin-bottom: 6px; color: var(--text2); white-space: pre-wrap; word-break: break-word; }
   .battle-log-item.end { color: var(--yellow); }
   .monster-row { display: grid; grid-template-columns: 1fr 80px 130px; gap: 8px; align-items: center; margin-bottom: 6px; }
@@ -604,7 +609,7 @@
         </div>
 
         <!-- 报文列表 -->
-        <div id="packet-list" style="flex:1; overflow-y:auto; min-height:200px;"></div>
+        <div id="packet-list"></div>
 
       </div>
     </div>

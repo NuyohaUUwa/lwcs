@@ -277,7 +277,8 @@ def _control_worker_tick(now: float) -> None:
             monster_code = session.battle_loop_monster_code or session.battle_current_monster
         session.notify_battle_state()
         if monster_code:
-            res = start_loop_battle_round(monster_code, run_pre_battle_actions=False)
+            # 上一轮战斗结束时已 prepare 的自动使用，需在本轮 f603 前执行（run_pending_auto_use_actions）
+            res = start_loop_battle_round(monster_code, run_pre_battle_actions=True)
             if not res.get("ok"):
                 error = res.get("error") or "下一轮战斗启动失败"
                 _emit_control_log(

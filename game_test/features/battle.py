@@ -75,16 +75,6 @@ _TELEPORT_TICKET_PACKET_TEMPLATE = (
     "1c000000e80303003e28{random_2}f605452800000a0000005d000000000000000000"
 )
 AUTO_USE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "auto_use_rules.json")
-_DEFAULT_AUTO_USE_RULES: List[Dict[str, Any]] = [
-    {"id": "auto_mp", "label": "回蓝不足自动补蓝", "enabled": True, "stat_key": "回蓝", "threshold": 1000, "item_name": "自动补蓝(100万)", "item_id": "6c7600000000"},
-    {"id": "auto_hp", "label": "回血不足自动补血", "enabled": False, "stat_key": "回血", "threshold": 1000, "item_name": "自动补血(大)", "item_id": "627600000000"},
-    {"id": "auto_exp_up", "label": "经验UP不足自动使用经验丹", "enabled": True, "stat_key": "经验UP", "threshold": 2, "item_name": "双倍经验丹(大)", "item_id": "617600000000"},
-    {"id": "auto_money_up", "label": "金钱UP不足自动补充", "enabled": False, "stat_key": "金钱UP", "threshold": 2, "item_name": "金钱UP道具", "item_id": ""},
-    {"id": "auto_attack_up", "label": "攻击UP不足自动补充", "enabled": False, "stat_key": "攻击UP", "threshold": 2, "item_name": "攻击UP道具", "item_id": ""},
-    {"id": "auto_zhenlong", "label": "珍珑宝库次数不足自动补充", "enabled": True, "stat_key": "珍珑宝库次数", "threshold": 5, "item_name": "珍珑宝库卡(1000)", "item_id": "3b1103000000"},
-    {"id": "auto_jinku", "label": "金库次数不足自动补充", "enabled": False, "stat_key": "金库次数", "threshold": 5, "item_name": "金库券", "item_id": ""},
-    {"id": "battle_teleport_ticket", "label": "使用一次传送券", "enabled": False, "stat_key": "", "threshold": 0, "item_name": "宝库券", "item_id": "c98601000000"},
-]
 
 
 def _normalize_hex4(value: str, name: str) -> str:
@@ -130,36 +120,16 @@ def _normalize_auto_use_rule(rule: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _merge_default_auto_use_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    merged = {r["id"]: dict(r) for r in rules if r.get("id")}
-    changed = False
-    for default in _DEFAULT_AUTO_USE_RULES:
-        rid = default["id"]
-        if rid not in merged:
-            merged[rid] = _normalize_auto_use_rule(default)
-            changed = True
+def _parse_auto_use_rules_list(raw: List[Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for r in raw:
+        if not isinstance(r, dict):
             continue
-        current = merged[rid]
-        for key in ("label", "stat_key", "item_name"):
-            if not current.get(key) and default.get(key):
-                current[key] = default[key]
-                changed = True
-        if not current.get("item_id") and default.get("item_id"):
-            current["item_id"] = default["item_id"]
-            changed = True
-    ordered = []
-    seen = set()
-    for default in _DEFAULT_AUTO_USE_RULES:
-        rid = default["id"]
-        if rid in merged:
-            ordered.append(_normalize_auto_use_rule(merged[rid]))
-            seen.add(rid)
-    for rid, rule in merged.items():
-        if rid not in seen:
-            ordered.append(_normalize_auto_use_rule(rule))
-    if changed:
-        _save_auto_use_rules(ordered)
-    return ordered
+        rid = str(r.get("id", "")).strip()
+        if not rid:
+            continue
+        out.append(_normalize_auto_use_rule(r))
+    return out
 
 
 def _load_auto_use_rules() -> List[Dict[str, Any]]:
@@ -169,17 +139,9 @@ def _load_auto_use_rules() -> List[Dict[str, Any]]:
         if not isinstance(raw, list):
             raise ValueError("rules must be list")
     except Exception:
-        return [dict(x) for x in _DEFAULT_AUTO_USE_RULES]
+        return []
 
-    out: List[Dict[str, Any]] = []
-    for r in raw:
-        if not isinstance(r, dict):
-            continue
-        rid = str(r.get("id", "")).strip()
-        if not rid:
-            continue
-        out.append(_normalize_auto_use_rule(r))
-    return _merge_default_auto_use_rules(out)
+    return _parse_auto_use_rules_list(raw)
 
 
 def _save_auto_use_rules(rules: List[Dict[str, Any]]) -> None:
@@ -210,7 +172,6 @@ def set_auto_use_rules(updated_rules: List[Dict[str, Any]]) -> List[Dict[str, An
         new_rules.append(_normalize_auto_use_rule(r))
 
     session = get_session()
-    new_rules = _merge_default_auto_use_rules(new_rules)
     with session._lock:
         session.auto_use_rules = new_rules
         if not hasattr(session, "auto_use_last_ts"):
