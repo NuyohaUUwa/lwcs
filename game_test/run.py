@@ -12,8 +12,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from api.server import app
 from config import API_HOST, API_PORT, API_DEBUG
+from services.packet_log_service import init_packet_log_session
 
 if __name__ == "__main__":
+    init_packet_log_session()
     print("=" * 50)
     print("  游戏测试应用")
     print("=" * 50)

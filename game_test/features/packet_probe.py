@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any
 
 from core.codec import extract_utf8_segments, extract_packet_fingerprint
 from core.session import get_session
+from services.packet_log_service import append_packet_record
 
 # ------------------------------------------------------------------ #
 #  指纹描述表（内置 + 用户新增，持久化到 data/fingerprints.json）        #
@@ -204,8 +205,10 @@ def record_packet(raw_bytes_or_hex, direction: str) -> PacketRecord:
         annotation=annotation,
     )
 
+    record_dict = record.to_dict()
     session = get_session()
-    session.append_packet(record.to_dict())
+    session.append_packet(record_dict)
+    append_packet_record(record_dict)
     return record
 
 

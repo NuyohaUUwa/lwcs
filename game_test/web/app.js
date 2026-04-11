@@ -10,8 +10,8 @@ let backpackItemsCache = [];
 let eventSource = null;
 let isConnected = false;
 let prevConnected = false;
-let reconnectTimer = null;
-let reconnectAttempts = 0;
+let unifiedLoginLockPromise = null;
+let unifiedLoginLastTriggerTs = 0;
 let lastConnectInfo = { account: '', password: '', loginServer: '', serverIp: '', serverPort: 0, serverName: '', roleId: '' };
 let buyItemFavorites = [];
 let selectedBuyItemCode = '';
@@ -23,20 +23,11 @@ let starStoneTotalFragment = 0;
 let starStoneTimer = null;
 let battleMonsters = [];
 let selectedMonsterCode = '';
-let battleLoopRunning = false;
-let battleCount = 0;
-let totalBattleExp = 0;
-let totalBattleGoldCopper = 0;
-let battleNextPending = false;
-let battleAwaiting = 'idle'; // idle -> waiting_de07 -> waiting_result
-let battleRoundIndex = 0;     // 当前循环轮次（仅循环模式）
-let de07WatchTimer = null;    // 等待 de07 超时定时器
-let de07RetryCount = 0;       // 当前轮 f603 超时重试次数
-let f703WatchTimer = null;    // 等待 f703 结果超时定时器
-let battleRecoveryInProgress = false;
 let battleLogMode = 'simple'; // simple | detail
 let autoUseRules = [];
-let battleManualSingle = false; // 当前轮是否为手动单次
+let controlState = { auto_reconnect_enabled: false, reconnect_state: 'idle', reconnect_attempts: 0, reconnect_max_attempts: 3, reconnect_last_error: '', reconnect_next_retry_in: null, reconnect_banned_wait_in: null };
+let battleState = { state: 'idle', in_progress: false, mode: 'idle', loop_running: false, current_monster: '', loop_monster_code: '', loop_delay_ms: 1900, total_count: 0, total_exp: 0, total_gold_copper: 0 };
+let lastStatusData = { connected: false, connection_status: 'disconnected', role: null, server_name: '' };
 
 // ================================================================== //
 //  工具函数                                                            //
@@ -82,6 +73,7 @@ function startSSE() {
     try {
       const msg = JSON.parse(e.data);
       if (msg.type === 'status') updateStatus(msg.data);
+      else if (msg.type === 'control_state') setControlState(msg.data);
       else if (msg.type === 'backpack') {
         renderBackpack(msg.data);
         handleStarStoneBackpackUpdate();
@@ -96,6 +88,8 @@ function startSSE() {
       else if (msg.type === 'battle_response') onBattleResponse(msg.data);
       else if (msg.type === 'battle_end') onBattleEnd(msg.data);
       else if (msg.type === 'battle_not_killed') onBattleNotKilled(msg.data);
+      else if (msg.type === 'battle_state') onBattleState(msg.data);
+      else if (msg.type === 'control_log') onControlLog(msg.data);
       else if (msg.type === 'auto_use') onAutoUseEvent(msg.data);
       else if (msg.type === 'monsters') renderMonsterList(msg.data);
     } catch (_) {}
@@ -110,69 +104,124 @@ function startSSE() {
 // 心跳状态轮询定时器
 let _heartbeatPollTimer = null;
 const STALE_WARN_S = 60;   // 距上次收包 > 60s 开始显示警告
+const RECONNECT_ROLE_STATS_TIMEOUT_MS = 5000;
+const RECONNECT_ROLE_STATS_POLL_MS = 250;
 
-function updateStatus(data) {
-  const wasConnected = prevConnected;
-  isConnected = data.connected;
-  prevConnected = isConnected;
+function setControlState(data) {
+  controlState = { ...controlState, ...(data || {}) };
+  const chk = document.getElementById('chk-auto-reconnect');
+  if (chk && typeof controlState.auto_reconnect_enabled === 'boolean' && chk.checked !== controlState.auto_reconnect_enabled) {
+    chk.checked = controlState.auto_reconnect_enabled;
+  }
+  renderTopbarStatus(lastStatusData);
+}
+
+function updateBattleState(data) {
+  battleState = { ...battleState, ...(data || {}) };
+  if (!selectedMonsterCode && battleState.loop_monster_code) {
+    selectedMonsterCode = String(battleState.loop_monster_code || '').toLowerCase();
+  }
+  const delayEl = document.getElementById('battle-loop-delay');
+  if (delayEl && Number.isFinite(Number(battleState.loop_delay_ms))) {
+    delayEl.value = String(battleState.loop_delay_ms);
+  }
+  updateCurrentMonster();
+  updateBattleStatsText();
+  syncBattleLoopButton();
+  renderTopbarStatus(lastStatusData);
+}
+
+function getReconnectInfoText() {
+  const state = String(controlState.reconnect_state || 'idle');
+  if (state === 'running') {
+    return `后端重连中…(${Number(controlState.reconnect_attempts || 0)}/${Number(controlState.reconnect_max_attempts || 0)})`;
+  }
+  if (state === 'scheduled') {
+    const wait = Number(controlState.reconnect_next_retry_in || 0);
+    return wait > 0 ? `${wait.toFixed(wait >= 10 ? 0 : 1)}s 后由后端重连` : '等待后端重连';
+  }
+  if (state === 'banned_wait') {
+    const wait = Number(controlState.reconnect_banned_wait_in || 0);
+    return wait > 0 ? `角色禁封等待中，约 ${Math.ceil(wait / 60)} 分钟后重连` : '角色禁封等待中';
+  }
+  if (state === 'failed') {
+    return controlState.reconnect_last_error
+      ? `后端重连失败：${controlState.reconnect_last_error}`
+      : '后端重连失败';
+  }
+  return '';
+}
+
+function renderTopbarStatus(data) {
   const dot = document.getElementById('status-dot');
   const txt = document.getElementById('status-text');
   const badge = document.getElementById('role-badge');
   const btnDisc = document.getElementById('btn-disconnect');
+  const reconnectInfoEl = document.getElementById('reconnect-info');
+  const reconnectInfoText = getReconnectInfoText();
+  reconnectInfoEl.textContent = reconnectInfoText;
 
   if (isConnected) {
     const r = data.role;
-    const age = data.last_recv_age;           // 距上次收包秒数
+    const age = data.last_recv_age;
     const stale = age !== null && age > STALE_WARN_S;
     dot.className = stale ? 'stale' : 'connected';
-    if (stale) {
-      txt.textContent = `⚠ 心跳超时 ${Math.round(age)}s · ${data.server_name || ''}`;
-    } else {
-      txt.textContent = `已连接 · ${data.server_name || ''}`;
-    }
+    txt.textContent = stale ? `⚠ 心跳超时 ${Math.round(age)}s · ${data.server_name || ''}` : `已连接 · ${data.server_name || ''}`;
     badge.textContent = r ? `${r.role_name} · ${r.role_job}` : '未选角';
     btnDisc.style.display = 'inline-block';
     document.getElementById('role-stats-panel').classList.add('visible');
-    // 重连成功：清除计时器
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    reconnectAttempts = 0;
-    document.getElementById('reconnect-info').textContent = '';
+    return;
+  }
+
+  _stopHeartbeatPoll();
+  dot.className = '';
+  btnDisc.style.display = data.connection_status === 'got_session' ? 'inline-block' : 'none';
+  if (data.connection_status !== 'got_session') {
+    badge.textContent = '—';
+    renderBackpack([]);
+    document.getElementById('role-stats-panel').classList.remove('visible');
+    if (controlState.reconnect_state === 'running') {
+      txt.textContent = '后端重连中…';
+    } else if (controlState.reconnect_state === 'scheduled') {
+      txt.textContent = battleState.loop_running ? '循环战斗等待后端恢复' : '等待后端重连';
+    } else if (controlState.reconnect_state === 'banned_wait') {
+      txt.textContent = '该角色已被禁封';
+    } else if (controlState.reconnect_state === 'failed') {
+      txt.textContent = battleState.loop_running ? '循环战斗恢复失败' : '重连失败';
+    } else {
+      txt.textContent = '未连接';
+    }
+  } else {
+    txt.textContent = '已登录，未选角';
+  }
+}
+
+function updateStatus(data) {
+  lastStatusData = { ...lastStatusData, ...(data || {}) };
+  isConnected = data.connected;
+  prevConnected = isConnected;
+  if (data.control_state) setControlState(data.control_state);
+  if (data.battle_state) updateBattleState(data.battle_state);
+
+  if (isConnected) {
     // 加载角色属性
     api('GET', '/api/role-stats').then(r => { if (r.ok && r.stats) renderRoleStats(r); });
     // 启动心跳轮询（已连接时每 20s 刷新一次状态以更新心跳年龄）
     _startHeartbeatPoll();
-  } else {
-    _stopHeartbeatPoll();
-    dot.className = '';
-    if (data.connection_status !== 'got_session') {
-      badge.textContent = '—';
-      btnDisc.style.display = 'none';
-      renderBackpack([]);
-      document.getElementById('role-stats-panel').classList.remove('visible');
-      // 如果从已连接变成断线，且未主动断线，触发自动重连
-      if (wasConnected && document.getElementById('chk-auto-reconnect').checked && lastConnectInfo.roleId) {
-        txt.textContent = '连接断开';
-        scheduleReconnect();
-      } else if (!reconnectTimer) {
-        txt.textContent = '未连接';
-        document.getElementById('reconnect-info').textContent = '';
-      }
-    } else {
-      txt.textContent = '已登录，未选角';
-    }
   }
+  renderTopbarStatus(data);
 }
 
 function _startHeartbeatPoll() {
   if (_heartbeatPollTimer) return;
-  // 每 5s 轮询一次（与后端心跳线程间隔对齐，确保 stale 警告能及时显示）
+  // 每 10s 轮询一次，与后端心跳线程节奏对齐
   _heartbeatPollTimer = setInterval(async () => {
     if (!isConnected) { _stopHeartbeatPoll(); return; }
     try {
       const status = await api('GET', '/api/status');
       if (status) updateStatus(status);
     } catch (_) {}
-  }, 5000);
+  }, 10000);
 }
 
 function _stopHeartbeatPoll() {
@@ -199,6 +248,76 @@ async function performLoginFlow(info) {
   const enterRes = await api('POST', '/api/select-role', { role_id: info.roleId });
   if (!enterRes.ok) return { ok: false, error: enterRes.error || '选角失败' };
   return { ok: true, role: enterRes.role || null };
+}
+
+function hasRenderableRoleStats(stats) {
+  return !!stats && typeof stats === 'object' && Object.keys(stats).length > 0;
+}
+
+async function waitForRoleStatsReady(timeoutMs = RECONNECT_ROLE_STATS_TIMEOUT_MS) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const res = await api('GET', '/api/role-stats').catch(() => null);
+    if (res?.ok && hasRenderableRoleStats(res.stats)) {
+      renderRoleStats(res);
+      return { ok: true, stats: res.stats };
+    }
+    await new Promise((resolve) => setTimeout(resolve, RECONNECT_ROLE_STATS_POLL_MS));
+  }
+  return { ok: false, error: '重连后未获取到角色属性' };
+}
+
+async function runUnifiedQuickLogin(info, opts = {}) {
+  const reason = String(opts.reason || '一键登录');
+  const updateUi = opts.updateUi !== false;
+  const requireRoleStats = opts.requireRoleStats !== false;
+  const now = Date.now();
+  if (unifiedLoginLockPromise) {
+    return { ok: false, error: `${reason}触发过于频繁，请稍后再试`, throttled: true };
+  }
+  if (now - unifiedLoginLastTriggerTs < 1000) {
+    return { ok: false, error: `${reason}1秒内只允许触发一次`, throttled: true };
+  }
+  unifiedLoginLastTriggerTs = now;
+
+  const runner = (async () => {
+    if (!info.account || !info.password || !info.loginServer || !info.serverIp || !info.serverPort || !info.roleId) {
+      return { ok: false, error: '缺少一键登录所需的完整上下文' };
+    }
+    if (updateUi) {
+      document.getElementById('status-text').textContent = `${reason}中…`;
+    }
+    const flow = await performLoginFlow(info);
+    if (flow.ok && requireRoleStats) {
+      const statsReady = await waitForRoleStatsReady();
+      if (!statsReady.ok) {
+        await api('POST', '/api/disconnect', {}).catch(() => null);
+        return statsReady;
+      }
+    }
+    if (flow.ok) {
+      lastConnectInfo = {
+        account: info.account || '',
+        password: info.password || '',
+        loginServer: info.loginServer || '',
+        serverIp: info.serverIp || '',
+        serverPort: Number(info.serverPort || 0),
+        serverName: info.serverName || '',
+        roleId: info.roleId || '',
+      };
+      localStorage.setItem('lastConnectInfo', JSON.stringify(lastConnectInfo));
+    }
+    return flow;
+  })();
+
+  unifiedLoginLockPromise = runner;
+  try {
+    return await runner;
+  } finally {
+    if (unifiedLoginLockPromise === runner) {
+      unifiedLoginLockPromise = null;
+    }
+  }
 }
 
 async function saveQuickLoginEntry(roleObj) {
@@ -255,7 +374,7 @@ async function quickLoginRun(id) {
     serverName: item.server_name || '',
     roleId: item.role_id || '',
   };
-  const flow = await performLoginFlow(lastConnectInfo);
+  const flow = await runUnifiedQuickLogin(lastConnectInfo, { reason: '一键登录' });
   if (flow.ok) {
     localStorage.setItem('lastConnectInfo', JSON.stringify(lastConnectInfo));
     document.getElementById('login-panel').style.display = 'none';
@@ -395,15 +514,17 @@ async function enterGame() {
 }
 
 async function disconnect() {
-  // 主动断线：清空重连信息，防止自动重连
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  reconnectAttempts = 0;
-  lastConnectInfo.roleId = '';
-  localStorage.removeItem('lastConnectInfo');
   document.getElementById('reconnect-info').textContent = '';
+  if (!battleState.loop_running) {
+    // 非循环战斗场景下，主动断线仍视为彻底退出
+    lastConnectInfo.roleId = '';
+    localStorage.removeItem('lastConnectInfo');
+  }
   await api('POST', '/api/disconnect');
   prevConnected = false;
-  resetToLoginState();
+  if (!battleState.loop_running) {
+    resetToLoginState();
+  }
 }
 
 function resetToLoginState() {
@@ -422,34 +543,6 @@ function resetToLoginState() {
   document.getElementById('btn-disconnect').style.display = 'none';
   document.getElementById('role-stats-panel').classList.remove('visible');
   renderBackpack([]);
-}
-
-function scheduleReconnect() {
-  if (!document.getElementById('chk-auto-reconnect').checked) return;
-  if (reconnectTimer) return;
-  reconnectAttempts++;
-  const delay = Math.min(3000 * reconnectAttempts, 30000);
-  document.getElementById('reconnect-info').textContent = `${delay / 1000}s 后重连(${reconnectAttempts})…`;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    autoReconnect();
-  }, delay);
-}
-
-async function autoReconnect() {
-  const info = lastConnectInfo;
-  if (!info.account || !info.roleId) return;
-  document.getElementById('reconnect-info').textContent = `重连中…(${reconnectAttempts})`;
-  document.getElementById('status-text').textContent = '重连中…';
-  try {
-    const flow = await performLoginFlow(info);
-    if (!flow.ok) { scheduleReconnect(); return; }
-    // 成功：updateStatus 会处理 UI 更新
-    document.getElementById('reconnect-info').textContent = '重连成功';
-    setTimeout(() => { document.getElementById('reconnect-info').textContent = ''; }, 2000);
-  } catch (e) {
-    scheduleReconnect();
-  }
 }
 
 // ================================================================== //
@@ -662,11 +755,11 @@ function parseStarStoneRewards(record) {
 }
 
 function findStarStoneBuyFavorite() {
-  return buyItemFavorites.find((x) => /特步鞋|特步靴/.test(x.name || ''));
+  return buyItemFavorites.find((x) => /特步鞋/.test(x.name || ''));
 }
 
 function findStarStoneDecomposeItem() {
-  return backpackItemsCache.find((x) => /特步鞋|特步靴/.test(x.name || ''));
+  return backpackItemsCache.find((x) => /特步鞋/.test(x.name || ''));
 }
 
 function stopStarStoneLoop(reason = '', msgType = 'info') {
@@ -684,7 +777,7 @@ async function runStarStoneCycle() {
   if (!starStoneLoopRunning) return;
   const favorite = findStarStoneBuyFavorite();
   if (!favorite) {
-    stopStarStoneLoop('未找到常用购买物品“特步鞋/特步靴”，请先在购买物品管理中保存', 'err');
+    stopStarStoneLoop('未找到常用购买物品“特步鞋”，请先在购买物品管理中保存', 'err');
     return;
   }
   starStoneAwaiting = 'buy';
@@ -802,6 +895,12 @@ function renderAutoUseRules() {
     box.innerHTML = '<div class="text-muted text-sm">暂无配置</div>';
     return;
   }
+  const isDurationRule = (rule) => ['经验UP', '攻击UP', '金钱UP'].includes(String(rule?.stat_key || ''));
+  const buildRuleHint = (rule) => {
+    if (rule?.id === 'battle_teleport_ticket') return '条件：战斗开始前执行一次';
+    if (isDurationRule(rule)) return `条件：${rule.stat_key || ''} < ${String(rule.threshold ?? '')} 分钟`;
+    return `条件：${rule.stat_key || ''} < ${String(rule.threshold ?? '')}`;
+  };
   box.innerHTML = autoUseRules.map((r, i) => `
     <div style="border:1px solid var(--border); border-radius:6px; padding:8px; margin-bottom:6px;">
       <label style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
@@ -819,7 +918,7 @@ function renderAutoUseRules() {
         <input type="text" value="${escAttr(r.item_id || '')}" style="width:150px; padding:3px 6px;"
           onchange="autoUseRules[${i}].item_id=this.value.toLowerCase()">
       </div>
-      <div class="text-muted text-sm mt-8">条件：${escHtml(r.stat_key || '')} < ${escHtml(String(r.threshold ?? ''))}</div>
+      <div class="text-muted text-sm mt-8">${escHtml(buildRuleHint(r))}</div>
     </div>
   `).join('');
 }
@@ -900,8 +999,9 @@ async function deleteSelectedMonster() {
 }
 
 function updateCurrentMonster() {
-  const cur = battleMonsters.find(x => (x.code || '').toLowerCase() === selectedMonsterCode);
-  document.getElementById('battle-current-monster').textContent = cur ? `${cur.name} (${cur.code})` : '未选择';
+  const activeCode = String(battleState.loop_monster_code || battleState.current_monster || selectedMonsterCode || '').toLowerCase();
+  const cur = battleMonsters.find(x => (x.code || '').toLowerCase() === activeCode);
+  document.getElementById('battle-current-monster').textContent = cur ? `${cur.name} (${cur.code})` : (activeCode || '未选择');
 }
 
 function appendBattleLog(data, kind) {
@@ -919,6 +1019,12 @@ function appendBattleLog(data, kind) {
   box.scrollTop = box.scrollHeight;
 }
 
+function onControlLog(data) {
+  if (!data?.message) return;
+  const kind = data.level === 'warn' ? 'end' : 'response';
+  appendBattleLog({ raw_text: data.message }, kind);
+}
+
 function appendBattlePacketLine(record) {
   const fp = (record.fingerprint || '').toLowerCase();
   const watch = ['e8030500f603', 'e8030500f703', 'e8030100de07', 'e8030100df07'];
@@ -930,49 +1036,16 @@ function appendBattlePacketLine(record) {
 }
 
 async function onBattleResponse(data) {
+  updateBattleState(data?.battle_state || {});
   if (battleLogMode === 'detail') appendBattleLog(data, 'response');
-  const rawText = String(data?.raw_text || '');
-  if (rawText.includes('战斗已结束') || rawText.includes('e68898e69697e5b7b2e7bb93e69d9f')) {
-    appendBattleLog({ raw_text: '检测到“战斗已结束”，停止发送 f703，改为重发 f603' }, 'response');
-    await restartBattleByF603('战斗已结束，重发 f603 失败');
-    return;
-  }
-  // 已收到 de07，停止超时重试
-  if (de07WatchTimer) {
-    clearTimeout(de07WatchTimer);
-    de07WatchTimer = null;
-  }
-  de07RetryCount = 0;
-  // 第二步：收到 de07 后才发送 f703
-  if (battleAwaiting !== 'waiting_de07' || battleNextPending) return;
-  await sendBattleDoWithDelay();
 }
 
 function onBattleEnd(data) {
-  // 战斗结束时不输出原始转译内容，只输出结果摘要
-  if (f703WatchTimer) { clearTimeout(f703WatchTimer); f703WatchTimer = null; }
+  updateBattleState(data?.battle_state || {});
   if (data?.no_energy) {
     appendBattleLog({ raw_text: '内力不足' }, 'end');
-    stopBattleLoopWithReason('内力不足，已停止循环');
     return;
   }
-  const hasExpFromBackend = typeof data?.exp === 'number';
-  const hasGoldFromBackend = typeof data?.gold === 'number';
-  if (hasExpFromBackend) totalBattleExp += data.exp;
-  if (hasGoldFromBackend) totalBattleGoldCopper += data.gold;
-  // 兜底：后端未提取到数值时，前端再从文本提取一次（支持金银铜）
-  if (data?.raw_text && (!hasExpFromBackend || !hasGoldFromBackend)) {
-    const t = String(data.raw_text);
-    if (!hasExpFromBackend) {
-      const em = t.match(/(?:获得)?经验[：:+\s]*([0-9]+)/);
-      if (em) totalBattleExp += Number(em[1] || 0);
-    }
-    if (!hasGoldFromBackend) {
-      const gm = parseGoldToCopperFromText(t);
-      if (gm !== null) totalBattleGoldCopper += gm;
-    }
-  }
-  battleCount += 1;
   const resultGold = formatGoldFromCopper(
     (typeof data?.gold === 'number') ? data.gold : (parseGoldToCopperFromText(String(data?.raw_text || '')) || 0)
   );
@@ -980,38 +1053,23 @@ function onBattleEnd(data) {
     ? data.exp
     : Number((String(data?.raw_text || '').match(/(?:获得)?经验[：:+\s]*([0-9]+)/)?.[1] || 0));
   appendBattleLog({
-    raw_text: `第${battleCount}次 / 本次获得经验${resultExp} / 获得金币${resultGold}`
+    raw_text: `第${Number(data?.battle_state?.total_count || battleState.total_count || 0)}次 / 本次获得经验${resultExp} / 获得金币${resultGold}`
   }, 'end');
-  updateBattleStatsText();
-  battleNextPending = false;
-  battleAwaiting = 'idle';
-  battleManualSingle = false;
-  if (battleLoopRunning) {
-    battleRoundIndex += 1;
-    const waitMs = battleRoundIndex >= 1 ? getBattleLoopDelayMs() : 0;
-    setTimeout(() => {
-      if (battleLoopRunning && !battleNextPending) triggerBattleOnce();
-    }, waitMs);
-  }
 }
 
 async function onBattleNotKilled(data) {
+  updateBattleState(data?.battle_state || {});
   if (battleLogMode === 'detail') appendBattleLog(data, 'response');
-  const rawText = String(data?.raw_text || '');
-  if (rawText.includes('战斗已结束') || rawText.includes('e68898e69697e5b7b2e7bb93e69d9f')) {
-    appendBattleLog({ raw_text: '检测到“战斗已结束”，停止发送 f703，改为重发 f603' }, 'response');
-    await restartBattleByF603('战斗已结束，重发 f603 失败');
-    return;
-  }
-  // 仅在等待战斗结果时，判定未秒杀后继续发 f703
-  if (battleAwaiting !== 'waiting_result' || battleNextPending) return;
-  await sendBattleDoWithDelay();
+}
+
+function onBattleState(data) {
+  updateBattleState(data || {});
 }
 
 function updateBattleStatsText() {
-  const g = formatGoldFromCopper(totalBattleGoldCopper);
+  const g = formatGoldFromCopper(battleState.total_gold_copper || 0);
   document.getElementById('battle-stats').textContent =
-    `总战斗次数: ${battleCount} / 总获得经验: ${totalBattleExp} / 总获得金币: ${g}`;
+    `总战斗次数: ${Number(battleState.total_count || 0)} / 总获得经验: ${Number(battleState.total_exp || 0)} / 总获得金币: ${g}`;
 }
 
 function parseGoldToCopperFromText(text) {
@@ -1035,55 +1093,46 @@ function formatGoldFromCopper(copper) {
   const rem1 = total % 1000000;
   const yin = Math.floor(rem1 / 1000);
   const tong = rem1 % 1000;
-  return `${tong}金${yin}银${jin}铜`;
+  return `${jin}金${yin}银${tong}铜`;
 }
 
 async function triggerBattleOnce(isManual = false) {
-  if (!selectedMonsterCode || battleNextPending || battleAwaiting !== 'idle') return;
-  battleManualSingle = !!isManual;
+  if (!selectedMonsterCode) return;
   appendBattleLog({ raw_text: '战斗开始' }, 'response');
-  battleNextPending = true;
-  // 第一步：仅发起战斗 f603，收到 de07 后才发 f703
-  const res = await api('POST', '/api/battle/start', { monster_code: selectedMonsterCode });
+  const res = await api('POST', '/api/battle/start', {
+    monster_code: selectedMonsterCode,
+    run_pre_battle_actions: true,
+  });
   if (!res.ok) {
-    battleNextPending = false;
-    battleAwaiting = 'idle';
     appendBattleLog({ raw_text: `发送失败: ${res.error || '未知错误'}` }, 'end');
     return;
   }
-  battleNextPending = false;
-  battleAwaiting = 'waiting_de07';
-  startDe07Watch();
+  updateBattleState(res.battle_state || {});
 }
 
-function toggleBattleLoop() {
-  battleLoopRunning = !battleLoopRunning;
-  const btn = document.getElementById('btn-battle-loop');
-  if (battleLoopRunning) {
-    battleManualSingle = false;
-    // 新一轮循环战斗前重置累计
-    battleCount = 0;
-    totalBattleExp = 0;
-    totalBattleGoldCopper = 0;
-    battleRoundIndex = 0;
-    de07RetryCount = 0;
-    if (de07WatchTimer) { clearTimeout(de07WatchTimer); de07WatchTimer = null; }
-    if (f703WatchTimer) { clearTimeout(f703WatchTimer); f703WatchTimer = null; }
-    updateBattleStatsText();
-    btn.textContent = '停止循环战斗';
-    btn.classList.remove('btn-success');
-    btn.classList.add('btn-danger');
-    if (!battleNextPending) triggerBattleOnce();
-  } else {
-    if (de07WatchTimer) { clearTimeout(de07WatchTimer); de07WatchTimer = null; }
-    if (f703WatchTimer) { clearTimeout(f703WatchTimer); f703WatchTimer = null; }
-    de07RetryCount = 0;
-    battleNextPending = false;
-    battleAwaiting = 'idle';
-    btn.textContent = '开始循环战斗';
-    btn.classList.remove('btn-danger');
-    btn.classList.add('btn-success');
+async function toggleBattleLoop() {
+  if (!selectedMonsterCode && !battleState.loop_running) {
+    appendBattleLog({ raw_text: '请先选择怪物' }, 'end');
+    return;
   }
+  if (!battleState.loop_running) {
+    const res = await api('POST', '/api/battle/loop/start', {
+      monster_code: selectedMonsterCode,
+      loop_delay_ms: getBattleLoopDelayMs(),
+    });
+    if (!res.ok) {
+      appendBattleLog({ raw_text: `启动循环战斗失败：${res.error || '未知错误'}` }, 'end');
+      return;
+    }
+    updateBattleState(res.battle_state || {});
+    return;
+  }
+  const res = await api('POST', '/api/battle/loop/stop', { reason: '前端请求停止循环战斗' });
+  if (!res.ok) {
+    appendBattleLog({ raw_text: `停止循环战斗失败：${res.error || '未知错误'}` }, 'end');
+    return;
+  }
+  updateBattleState(res.battle_state || {});
 }
 
 function getBattleLoopDelayMs() {
@@ -1093,122 +1142,13 @@ function getBattleLoopDelayMs() {
   return Math.floor(n);
 }
 
-function stopBattleLoopWithReason(reason) {
-  battleLoopRunning = false;
-  battleNextPending = false;
-  battleAwaiting = 'idle';
-  if (de07WatchTimer) { clearTimeout(de07WatchTimer); de07WatchTimer = null; }
-  if (f703WatchTimer) { clearTimeout(f703WatchTimer); f703WatchTimer = null; }
-  de07RetryCount = 0;
-  battleManualSingle = false;
+function syncBattleLoopButton() {
   const btn = document.getElementById('btn-battle-loop');
   if (btn) {
-    btn.textContent = '开始循环战斗';
-    btn.classList.remove('btn-danger');
-    btn.classList.add('btn-success');
+    btn.textContent = battleState.loop_running ? '停止循环战斗' : '开始循环战斗';
+    btn.classList.toggle('btn-danger', !!battleState.loop_running);
+    btn.classList.toggle('btn-success', !battleState.loop_running);
   }
-  if (reason) appendBattleLog({ raw_text: reason }, 'end');
-}
-
-async function attemptBattleRecovery(reasonText) {
-  if (battleRecoveryInProgress) return;
-  battleRecoveryInProgress = true;
-  appendBattleLog({ raw_text: `${reasonText}，开始自动重登(登录-选区-选角)...` }, 'end');
-  try {
-    const info = lastConnectInfo || {};
-    if (!info.account || !info.password || !info.serverIp || !info.serverPort || !info.roleId) {
-      stopBattleLoopWithReason('自动重登失败：缺少登录上下文');
-      return;
-    }
-    const flow = await performLoginFlow(info);
-    if (!flow.ok) {
-      stopBattleLoopWithReason(`自动重登失败：${flow.error || '未知错误'}`);
-      return;
-    }
-    appendBattleLog({ raw_text: '自动重登成功，继续战斗。' }, 'response');
-    battleAwaiting = 'idle';
-    battleNextPending = false;
-    de07RetryCount = 0;
-    if (battleLoopRunning) {
-      setTimeout(() => {
-        if (battleLoopRunning && !battleNextPending && battleAwaiting === 'idle') triggerBattleOnce();
-      }, 300);
-    }
-  } catch (e) {
-    stopBattleLoopWithReason(`自动重登异常：${e?.message || e}`);
-  } finally {
-    battleRecoveryInProgress = false;
-  }
-}
-
-function startF703Watch() {
-  if (f703WatchTimer) clearTimeout(f703WatchTimer);
-  f703WatchTimer = setTimeout(async () => {
-    f703WatchTimer = null;
-    if (battleAwaiting !== 'waiting_result') return;
-    if (battleManualSingle) {
-      stopBattleLoopWithReason('等待 f703 响应超时：手动单次不重试');
-      return;
-    }
-    appendBattleLog({ raw_text: '等待 f703 响应超时，改为重发 f603...' }, 'response');
-    await restartBattleByF603('重发 f603 失败');
-  }, 2000);
-}
-
-async function sendBattleDoWithDelay() {
-  if (battleNextPending) return;
-  battleNextPending = true;
-  const delayMs = 500;
-  await new Promise(resolve => setTimeout(resolve, delayMs));
-  const res = await api('POST', '/api/battle/do');
-  battleNextPending = false;
-  if (res.ok) {
-    battleAwaiting = 'waiting_result';
-    startF703Watch();
-  } else {
-    appendBattleLog({ raw_text: `发送 f703 失败: ${res.error || '未知错误'}` }, 'end');
-    if (battleManualSingle) {
-      stopBattleLoopWithReason('手动单次发送 f703 失败：不重试');
-      return;
-    }
-    await restartBattleByF603('f703 失败后重发 f603 失败');
-  }
-}
-
-function startDe07Watch() {
-  if (de07WatchTimer) clearTimeout(de07WatchTimer);
-  de07WatchTimer = setTimeout(async () => {
-    de07WatchTimer = null;
-    // 仅在仍等待 de07 时处理
-    if (battleAwaiting !== 'waiting_de07') return;
-    if (battleLoopRunning) {
-      await attemptBattleRecovery('等待 de07 超时：f603 失败，开始重登');
-    } else {
-      stopBattleLoopWithReason('等待 de07 超时：本次单次战斗已停止');
-    }
-  }, 2000);
-}
-
-async function restartBattleByF603(errorPrefix) {
-  if (battleManualSingle) {
-    stopBattleLoopWithReason(`${errorPrefix}：手动单次不重试`);
-    return false;
-  }
-  battleAwaiting = 'idle';
-  battleNextPending = false;
-  de07RetryCount = 0;
-  const startRes = await api('POST', '/api/battle/start', { monster_code: selectedMonsterCode });
-  if (!startRes.ok) {
-    if (battleLoopRunning) {
-      await attemptBattleRecovery(`${errorPrefix}：${startRes.error || '未知错误'}`);
-    } else {
-      stopBattleLoopWithReason(`${errorPrefix}：${startRes.error || '未知错误'}`);
-    }
-    return false;
-  }
-  battleAwaiting = 'waiting_de07';
-  startDe07Watch();
-  return true;
 }
 
 function clearBattleLog() {
@@ -1684,8 +1624,10 @@ function toggleCollapseMode() {
   const chkAR = document.getElementById('chk-auto-reconnect');
   const savedAR = localStorage.getItem('autoReconnect');
   if (savedAR !== null) chkAR.checked = (savedAR === 'true');
-  chkAR.addEventListener('change', () => {
+  chkAR.addEventListener('change', async () => {
     localStorage.setItem('autoReconnect', chkAR.checked);
+    const res = await api('PUT', '/api/control-config', { auto_reconnect: chkAR.checked }).catch(() => null);
+    if (res?.ok && res.control_state) setControlState(res.control_state);
   });
 
   // 检查是否已有连接状态
@@ -1711,6 +1653,13 @@ function toggleCollapseMode() {
       showServerPanel('', []);
     }
   }
+  const controlRes = await api('GET', '/api/control-state').catch(() => null);
+  if (controlRes?.ok) {
+    setControlState(controlRes.control_state || {});
+    updateBattleState(controlRes.battle_state || {});
+  }
+  const appliedControl = await api('PUT', '/api/control-config', { auto_reconnect: chkAR.checked }).catch(() => null);
+  if (appliedControl?.ok && appliedControl.control_state) setControlState(appliedControl.control_state);
   loadMonsters();
   loadAutoUseRules();
   loadQuickLogins();

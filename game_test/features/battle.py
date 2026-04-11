@@ -1,7 +1,7 @@
 """
 战斗功能：
 1) 客户端发起战斗（f603）
-2) 客户端进行战斗（f703）
+2) 服务端状态机驱动后续战斗（f703）
 3) 解析服务器战斗响应（de07）
 4) 解析服务器战斗结束（df07）
 """
@@ -13,6 +13,7 @@ import time
 from typing import Any, Dict, List
 
 from core.session import get_session
+from features import item_use
 from features.role_stats import update_session_stats
 from utils.random_num import random_num_hex4
 
@@ -23,6 +24,17 @@ _BATTLE_START_TEMPLATE = "1b000000e8030500f603{seq}f505fc030000090000000100{mons
 _BATTLE_SKILL_PACKET_TEMPLATE = (
     "22000000e8030500f703{random_num}f50504040000100000000100cb00000000000000030001020000"
 )
+
+BATTLE_STATE_IDLE = "idle"
+BATTLE_STATE_WAITING_START_RESPONSE = "waiting_start_response"
+BATTLE_STATE_WAITING_ACTION_RESULT = "waiting_action_result"
+BATTLE_STATE_ENDED = "ended"
+BATTLE_STATE_ERROR = "error"
+
+DE07_TIMEOUT_S = 3.0
+F703_TIMEOUT_S = 3.0
+BATTLE_WAIT_TIMEOUT_GRACE_S = 0.5
+
 
 def _load_default_monsters() -> list:
     """从 data/monsters.json 加载默认怪物列表。"""
@@ -53,10 +65,26 @@ def _load_default_monsters() -> list:
 DEFAULT_MONSTERS = _load_default_monsters()
 _BATTLE_END_HEX_TOKENS = (
     "e88eb7e5be97e7bb8fe9aa8cefbc9a",  # 获得经验：
-    "e88eb7e5be97e98791e5b8813a20",    # 获得金币: (半角冒号+空格)
+    "e88eb7e5be97e98791e5b8813a20",    # 获得金币:
 )
 _NEILI_NOT_ENOUGH_HEX_TOKEN = "e58685e58a9be4b88de8b6b3"  # 内力不足
+_BATTLE_ENDED_HEX_TOKEN = "e68898e69697e5b7b2e7bb93e69d9f"  # 战斗已结束
+_DURATION_STAT_KEYS = {"经验UP", "攻击UP", "金钱UP"}
+_TELEPORT_TICKET_PACKET_TEMPLATE = (
+    "12000000e80302000504{random_1}f5050204000000000000"
+    "1c000000e80303003e28{random_2}f605452800000a0000005d000000000000000000"
+)
 AUTO_USE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "auto_use_rules.json")
+_DEFAULT_AUTO_USE_RULES: List[Dict[str, Any]] = [
+    {"id": "auto_mp", "label": "回蓝不足自动补蓝", "enabled": True, "stat_key": "回蓝", "threshold": 1000, "item_name": "自动补蓝(100万)", "item_id": "6c7600000000"},
+    {"id": "auto_hp", "label": "回血不足自动补血", "enabled": False, "stat_key": "回血", "threshold": 1000, "item_name": "自动补血(大)", "item_id": "627600000000"},
+    {"id": "auto_exp_up", "label": "经验UP不足自动使用经验丹", "enabled": True, "stat_key": "经验UP", "threshold": 2, "item_name": "双倍经验丹(大)", "item_id": "617600000000"},
+    {"id": "auto_money_up", "label": "金钱UP不足自动补充", "enabled": False, "stat_key": "金钱UP", "threshold": 2, "item_name": "金钱UP道具", "item_id": ""},
+    {"id": "auto_attack_up", "label": "攻击UP不足自动补充", "enabled": False, "stat_key": "攻击UP", "threshold": 2, "item_name": "攻击UP道具", "item_id": ""},
+    {"id": "auto_zhenlong", "label": "珍珑宝库次数不足自动补充", "enabled": True, "stat_key": "珍珑宝库次数", "threshold": 5, "item_name": "珍珑宝库卡(1000)", "item_id": "3b1103000000"},
+    {"id": "auto_jinku", "label": "金库次数不足自动补充", "enabled": False, "stat_key": "金库次数", "threshold": 5, "item_name": "金库券", "item_id": ""},
+    {"id": "battle_teleport_ticket", "label": "使用一次传送券", "enabled": False, "stat_key": "", "threshold": 0, "item_name": "宝库券", "item_id": "c98601000000"},
+]
 
 
 def _normalize_hex4(value: str, name: str) -> str:
@@ -76,6 +104,19 @@ def _to_int(v) -> int:
     return int(m.group(0)) if m else 0
 
 
+def _parse_duration_minutes(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    hour_match = re.search(r"(\d+)\s*(?:时|小时)", text)
+    minute_match = re.search(r"(\d+)\s*(?:分|分钟)", text)
+    if hour_match or minute_match:
+        hours = int(hour_match.group(1)) if hour_match else 0
+        minutes = int(minute_match.group(1)) if minute_match else 0
+        return hours * 60 + minutes
+    return _to_int(text)
+
+
 def _normalize_auto_use_rule(rule: Dict[str, Any]) -> Dict[str, Any]:
     rid = str(rule.get("id", "")).strip()
     return {
@@ -89,6 +130,38 @@ def _normalize_auto_use_rule(rule: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _merge_default_auto_use_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged = {r["id"]: dict(r) for r in rules if r.get("id")}
+    changed = False
+    for default in _DEFAULT_AUTO_USE_RULES:
+        rid = default["id"]
+        if rid not in merged:
+            merged[rid] = _normalize_auto_use_rule(default)
+            changed = True
+            continue
+        current = merged[rid]
+        for key in ("label", "stat_key", "item_name"):
+            if not current.get(key) and default.get(key):
+                current[key] = default[key]
+                changed = True
+        if not current.get("item_id") and default.get("item_id"):
+            current["item_id"] = default["item_id"]
+            changed = True
+    ordered = []
+    seen = set()
+    for default in _DEFAULT_AUTO_USE_RULES:
+        rid = default["id"]
+        if rid in merged:
+            ordered.append(_normalize_auto_use_rule(merged[rid]))
+            seen.add(rid)
+    for rid, rule in merged.items():
+        if rid not in seen:
+            ordered.append(_normalize_auto_use_rule(rule))
+    if changed:
+        _save_auto_use_rules(ordered)
+    return ordered
+
+
 def _load_auto_use_rules() -> List[Dict[str, Any]]:
     try:
         with open(AUTO_USE_FILE, "r", encoding="utf-8") as f:
@@ -96,7 +169,7 @@ def _load_auto_use_rules() -> List[Dict[str, Any]]:
         if not isinstance(raw, list):
             raise ValueError("rules must be list")
     except Exception:
-        return []
+        return [dict(x) for x in _DEFAULT_AUTO_USE_RULES]
 
     out: List[Dict[str, Any]] = []
     for r in raw:
@@ -106,7 +179,7 @@ def _load_auto_use_rules() -> List[Dict[str, Any]]:
         if not rid:
             continue
         out.append(_normalize_auto_use_rule(r))
-    return out
+    return _merge_default_auto_use_rules(out)
 
 
 def _save_auto_use_rules(rules: List[Dict[str, Any]]) -> None:
@@ -122,6 +195,7 @@ def get_auto_use_rules() -> List[Dict[str, Any]]:
             rules = _load_auto_use_rules()
             session.auto_use_rules = rules
             session.auto_use_last_ts = {}
+            session.auto_use_pending_actions = []
         return [dict(x) for x in rules]
 
 
@@ -136,6 +210,7 @@ def set_auto_use_rules(updated_rules: List[Dict[str, Any]]) -> List[Dict[str, An
         new_rules.append(_normalize_auto_use_rule(r))
 
     session = get_session()
+    new_rules = _merge_default_auto_use_rules(new_rules)
     with session._lock:
         session.auto_use_rules = new_rules
         if not hasattr(session, "auto_use_last_ts"):
@@ -145,6 +220,10 @@ def set_auto_use_rules(updated_rules: List[Dict[str, Any]]) -> List[Dict[str, An
 
 
 def evaluate_auto_use(trigger: str = "") -> Dict[str, Any]:
+    return prepare_auto_use_actions(trigger)
+
+
+def prepare_auto_use_actions(trigger: str = "") -> Dict[str, Any]:
     session = get_session()
     if not session.connected:
         return {"ok": False, "error": "未连接"}
@@ -155,46 +234,94 @@ def evaluate_auto_use(trigger: str = "") -> Dict[str, Any]:
         stats = dict(session.role_stats)
         items = {k: v.to_dict() for k, v in session.backpack_items.items()}
         last_ts = dict(getattr(session, "auto_use_last_ts", {}))
+        pending_existing = {
+            str(x.get("id", "")): dict(x)
+            for x in getattr(session, "auto_use_pending_actions", [])
+            if isinstance(x, dict) and x.get("id")
+        }
 
     now = time.time()
     actions = []
     for rule in rules:
         if not rule.get("enabled"):
             continue
+        if rule.get("id") == "battle_teleport_ticket":
+            continue
         item_id = str(rule.get("item_id", "")).strip().lower()
         if not item_id:
             continue
         stat_key = rule.get("stat_key", "")
         threshold = int(rule.get("threshold", 0))
-        stat_val = _to_int(stats.get(stat_key, 0))
+        stat_val = _parse_duration_minutes(stats.get(stat_key, 0)) if stat_key in _DURATION_STAT_KEYS else _to_int(stats.get(stat_key, 0))
         if stat_val >= threshold:
+            continue
+        if rule["id"] in pending_existing:
             continue
         item = items.get(item_id)
         if not item or int(item.get("quantity", 0)) <= 0:
-            actions.append({"id": rule["id"], "ok": False, "reason": "背包无可用物品"})
+            actions.append({"id": rule["id"], "ok": False, "reason": "背包无可用物品", "phase": "prepared"})
             continue
         if now - float(last_ts.get(rule["id"], 0.0)) < 3.0:
             continue
 
-        res = use_auto_item(item_id)
-        actions.append({
+        prepared = {
             "id": rule["id"],
-            "ok": bool(res.get("ok")),
+            "ok": True,
             "item_id": item_id,
             "item_name": rule.get("item_name", ""),
             "stat_key": stat_key,
             "stat_value": stat_val,
             "threshold": threshold,
-            "error": res.get("error"),
-        })
-        if res.get("ok"):
-            last_ts[rule["id"]] = now
+            "phase": "prepared",
+            "prepared_ts": now,
+        }
+        actions.append(prepared)
+        pending_existing[rule["id"]] = prepared
 
     with session._lock:
         session.auto_use_last_ts = last_ts
+        session.auto_use_pending_actions = list(pending_existing.values())
 
     if actions:
-        session._notify_sse("auto_use", {"trigger": trigger, "actions": actions})
+        session._notify_sse("auto_use", {"trigger": trigger, "phase": "prepared", "actions": actions})
+    return {"ok": True, "trigger": trigger, "actions": actions}
+
+
+def run_pending_auto_use_actions(trigger: str = "") -> Dict[str, Any]:
+    session = get_session()
+    if not session.connected:
+        return {"ok": False, "error": "未连接"}
+
+    with session._lock:
+        pending = [dict(x) for x in getattr(session, "auto_use_pending_actions", []) if isinstance(x, dict)]
+        last_ts = dict(getattr(session, "auto_use_last_ts", {}))
+
+    if not pending:
+        return {"ok": True, "trigger": trigger, "actions": []}
+
+    now = time.time()
+    actions = []
+    for pending_action in pending:
+        item_id = str(pending_action.get("item_id", "")).strip().lower()
+        res = use_auto_item(item_id)
+        action_result = dict(pending_action)
+        action_result.update(
+            {
+                "phase": "executed",
+                "ok": bool(res.get("ok")),
+                "error": res.get("error"),
+            }
+        )
+        actions.append(action_result)
+        if res.get("ok"):
+            last_ts[pending_action["id"]] = now
+
+    with session._lock:
+        session.auto_use_last_ts = last_ts
+        session.auto_use_pending_actions = []
+
+    if actions:
+        session._notify_sse("auto_use", {"trigger": trigger, "phase": "executed", "actions": actions})
     return {"ok": True, "trigger": trigger, "actions": actions}
 
 
@@ -216,16 +343,12 @@ def _parse_gold_to_copper(text: str):
     if not m:
         return None
 
-    # 若原文明确出现单位，按单位组合；否则不认
     has_jin = "金" in text
     has_yin = "银" in text
     has_tong = "铜" in text
     if not (has_jin or has_yin or has_tong):
         return None
 
-    a, b, c = m.group(1), m.group(2), m.group(3)
-    # 为兼容“17铜”这类只含一个数字的场景：
-    # 先把所有数字抓出来，再按出现的单位映射
     nums = [int(x) for x in re.findall(r"([0-9]+)", m.group(0))]
     if not nums:
         return None
@@ -249,7 +372,271 @@ def _parse_gold_to_copper(text: str):
     return jin * 1000 * 1000 + yin * 1000 + tong
 
 
-def build_start_battle_packet(monster_code: str) -> Dict:
+def _build_battle_state_snapshot(session) -> Dict[str, Any]:
+    return {
+        "state": session.battle_state,
+        "in_progress": session.battle_in_progress,
+        "current_monster": session.battle_current_monster,
+        "last_action": session.battle_last_action,
+        "can_create_next": session.battle_can_create_next,
+        "last_response_ts": session.battle_last_response_ts,
+        "round_seq": session.battle_round_seq,
+        "mode": session.battle_mode,
+        "loop_running": session.battle_loop_running,
+        "loop_monster_code": session.battle_loop_monster_code,
+        "loop_delay_ms": session.battle_loop_delay_ms,
+        "wait_deadline_ts": session.battle_wait_deadline_ts,
+        "next_start_ts": session.battle_next_start_ts,
+        "total_count": session.battle_total_count,
+        "total_exp": session.battle_total_exp,
+        "total_gold_copper": session.battle_total_gold_copper,
+    }
+
+
+def _set_battle_state(
+    *,
+    state: str | None = None,
+    in_progress: bool | None = None,
+    current_monster: str | None = None,
+    last_action: str | None = None,
+    can_create_next: bool | None = None,
+    last_response_ts: float | None = None,
+    round_seq: int | None = None,
+    last_result: Dict[str, Any] | None = None,
+    mode: str | None = None,
+    wait_deadline_ts: float | None = None,
+    next_start_ts: float | None = None,
+) -> Dict[str, Any]:
+    session = get_session()
+    with session._lock:
+        if state is not None:
+            session.battle_state = state
+        if in_progress is not None:
+            session.battle_in_progress = in_progress
+        if current_monster is not None:
+            session.battle_current_monster = current_monster
+        if last_action is not None:
+            session.battle_last_action = last_action
+        if can_create_next is not None:
+            session.battle_can_create_next = can_create_next
+        if last_response_ts is not None:
+            session.battle_last_response_ts = last_response_ts
+        if round_seq is not None:
+            session.battle_round_seq = round_seq
+        if last_result is not None:
+            session.battle_last_result = dict(last_result)
+        if mode is not None:
+            session.battle_mode = mode
+        if wait_deadline_ts is not None:
+            session.battle_wait_deadline_ts = wait_deadline_ts
+        if next_start_ts is not None:
+            session.battle_next_start_ts = next_start_ts
+        snapshot = _build_battle_state_snapshot(session)
+    session.notify_battle_state()
+    return snapshot
+
+
+def _emit_battle_state_with_payload(event_type: str, payload: Dict[str, Any]) -> None:
+    session = get_session()
+    with session._lock:
+        payload["battle_state"] = _build_battle_state_snapshot(session)
+    session._notify_sse(event_type, payload)
+
+
+def get_battle_state_snapshot() -> Dict[str, Any]:
+    session = get_session()
+    with session._lock:
+        return _build_battle_state_snapshot(session)
+
+
+def _emit_control_log(message: str, *, level: str = "info", scope: str = "battle", **extra) -> None:
+    session = get_session()
+    payload = {"scope": scope, "level": level, "message": message}
+    if extra:
+        payload.update(extra)
+    session._notify_sse("control_log", payload)
+
+
+def _set_loop_config(*, enabled: bool, monster_code: str | None = None, delay_ms: int | None = None) -> Dict[str, Any]:
+    session = get_session()
+    with session._lock:
+        session.battle_loop_running = enabled
+        if monster_code is not None:
+            session.battle_loop_monster_code = monster_code
+        if delay_ms is not None:
+            session.battle_loop_delay_ms = max(0, int(delay_ms))
+        if not enabled:
+            session.battle_next_start_ts = 0.0
+            if session.battle_mode == "loop":
+                session.battle_mode = "single" if session.battle_in_progress else "idle"
+        elif session.battle_mode != "loop":
+            session.battle_mode = "loop"
+        snapshot = _build_battle_state_snapshot(session)
+    session.notify_battle_state()
+    return snapshot
+
+
+def _reset_battle_totals() -> None:
+    session = get_session()
+    with session._lock:
+        session.battle_total_count = 0
+        session.battle_total_exp = 0
+        session.battle_total_gold_copper = 0
+    session.notify_battle_state()
+
+
+def _schedule_next_battle_round(delay_ms: int | None = None) -> Dict[str, Any]:
+    session = get_session()
+    now = time.time()
+    with session._lock:
+        if delay_ms is None:
+            delay_ms = session.battle_loop_delay_ms
+        session.battle_next_start_ts = now + max(0, int(delay_ms)) / 1000.0
+        snapshot = _build_battle_state_snapshot(session)
+    session.notify_battle_state()
+    return snapshot
+
+
+def clear_battle_wait_deadline() -> Dict[str, Any]:
+    return _set_battle_state(wait_deadline_ts=0.0)
+
+
+def _start_battle_round(monster_code: str, *, run_pre_battle_actions: bool) -> Dict[str, Any]:
+    from services.action_manager import send_raw_action
+
+    ok, err = can_start_battle()
+    if not ok:
+        return {"ok": False, "error": err, "battle_state": get_battle_state_snapshot()}
+    try:
+        built = build_start_battle_packet(monster_code)
+    except ValueError as e:
+        return {"ok": False, "error": str(e), "battle_state": get_battle_state_snapshot()}
+
+    preflight_actions = []
+    if run_pre_battle_actions:
+        preflight_res = run_pre_battle_actions_fn()
+        if not preflight_res.get("ok"):
+            return {
+                "ok": False,
+                "error": preflight_res.get("error", "战斗前置动作失败"),
+                "battle_state": get_battle_state_snapshot(),
+            }
+        preflight_actions = preflight_res.get("actions", [])
+
+    res = send_raw_action(built["packet_hex"], priority=10, use_queue=True)
+    if not res.get("ok"):
+        return res
+
+    mark_battle_started(built["monster_code"])
+    result = {
+        "ok": True,
+        "queued": 1,
+        **built,
+        "battle_state": get_battle_state_snapshot(),
+        "preflight_actions": preflight_actions,
+    }
+    if res.get("validation_warning"):
+        result["validation_warning"] = res["validation_warning"]
+    return result
+
+
+def start_single_battle(monster_code: str, *, run_pre_battle_actions: bool = False) -> Dict[str, Any]:
+    ok, err = can_start_battle()
+    if not ok:
+        return {"ok": False, "error": err, "battle_state": get_battle_state_snapshot()}
+    session = get_session()
+    with session._lock:
+        session.battle_mode = "single"
+        session.battle_loop_running = False
+        session.battle_loop_monster_code = ""
+        session.battle_next_start_ts = 0.0
+    session.notify_battle_state()
+    return _start_battle_round(monster_code, run_pre_battle_actions=run_pre_battle_actions)
+
+
+def start_battle_loop(monster_code: str, *, loop_delay_ms: int) -> Dict[str, Any]:
+    ok, err = can_start_battle()
+    if not ok:
+        return {"ok": False, "error": err, "battle_state": get_battle_state_snapshot()}
+    session = get_session()
+    monster = _normalize_hex4(monster_code, "monster_code")
+    delay = max(0, int(loop_delay_ms))
+    _reset_battle_totals()
+    with session._lock:
+        session.battle_mode = "loop"
+        session.battle_loop_running = True
+        session.battle_loop_monster_code = monster
+        session.battle_loop_delay_ms = delay
+        session.battle_next_start_ts = 0.0
+    session.notify_battle_state()
+    _emit_control_log(f"后端已接管循环战斗，目标怪物 {monster}，间隔 {delay}ms", scope="battle")
+    result = _start_battle_round(monster, run_pre_battle_actions=not session.battle_preflight_teleport_used_once)
+    if not result.get("ok"):
+        _set_loop_config(enabled=False)
+    return result
+
+
+def stop_battle_loop(reason: str = "") -> Dict[str, Any]:
+    from services.flow_manager import cancel_pending_reconnect
+
+    snapshot = _set_loop_config(enabled=False)
+    cancel_pending_reconnect("循环战斗已停止，取消后端自动重连")
+    if reason:
+        _emit_control_log(reason, level="info", scope="battle")
+    return {"ok": True, "battle_state": snapshot}
+
+
+def schedule_loop_restart_after_reconnect(delay_s: float = 0.3) -> Dict[str, Any]:
+    return _set_battle_state(next_start_ts=time.time() + max(0.0, delay_s))
+
+
+def start_loop_battle_round(monster_code: str, *, run_pre_battle_actions: bool = False) -> Dict[str, Any]:
+    session = get_session()
+    with session._lock:
+        session.battle_mode = "loop"
+        session.battle_loop_running = True
+        session.battle_loop_monster_code = _normalize_hex4(
+            monster_code or session.battle_loop_monster_code or session.battle_current_monster,
+            "monster_code",
+        )
+        session.battle_next_start_ts = 0.0
+    session.notify_battle_state()
+    return _start_battle_round(session.battle_loop_monster_code, run_pre_battle_actions=run_pre_battle_actions)
+
+
+def get_wait_timeout_reason() -> str:
+    session = get_session()
+    with session._lock:
+        if session.battle_state == BATTLE_STATE_WAITING_START_RESPONSE:
+            return "等待 de07 超时"
+        if session.battle_state == BATTLE_STATE_WAITING_ACTION_RESULT:
+            return "等待 f703 响应超时"
+        return "战斗超时"
+
+
+def is_battle_wait_timed_out(now: float | None = None) -> bool:
+    session = get_session()
+    if now is None:
+        now = time.time()
+    with session._lock:
+        if session.battle_state not in (BATTLE_STATE_WAITING_START_RESPONSE, BATTLE_STATE_WAITING_ACTION_RESULT):
+            return False
+        wait_deadline_ts = float(session.battle_wait_deadline_ts or 0.0)
+        if wait_deadline_ts <= 0:
+            return False
+        if now < wait_deadline_ts + BATTLE_WAIT_TIMEOUT_GRACE_S:
+            return False
+        last_response_ts = float(session.battle_last_response_ts or 0.0)
+        if last_response_ts > 0 and last_response_ts >= wait_deadline_ts - BATTLE_WAIT_TIMEOUT_GRACE_S:
+            return False
+    return True
+
+
+def run_pre_battle_actions_fn() -> Dict[str, Any]:
+    return run_pre_battle_actions()
+
+
+def build_start_battle_packet(monster_code: str) -> Dict[str, Any]:
     """构造发起战斗报文。"""
     monster = _normalize_hex4(monster_code, "monster_code")
     random_num = random_num_hex4()
@@ -260,7 +647,7 @@ def build_start_battle_packet(monster_code: str) -> Dict:
     }
 
 
-def build_do_battle_packet() -> Dict:
+def build_do_battle_packet() -> Dict[str, Any]:
     """构造进行战斗报文。"""
     random_num = random_num_hex4()
     return {
@@ -269,58 +656,371 @@ def build_do_battle_packet() -> Dict:
     }
 
 
-def parse_battle_response(packet_hex: str) -> Dict:
-    """解析 de07：提取 UTF-8 文本并广播战斗过程。"""
+def can_start_battle() -> tuple[bool, str]:
     session = get_session()
-    text = _decode_utf8_text(packet_hex)
-    payload = {
+    with session._lock:
+        if session.battle_state in (BATTLE_STATE_WAITING_START_RESPONSE, BATTLE_STATE_WAITING_ACTION_RESULT):
+            return False, f"战斗仍在进行中，当前状态={session.battle_state}"
+    return True, ""
+
+
+def can_manual_battle_do() -> tuple[bool, str]:
+    session = get_session()
+    with session._lock:
+        if session.battle_state != BATTLE_STATE_WAITING_ACTION_RESULT or not session.battle_can_create_next:
+            return False, f"当前状态不允许发送，state={session.battle_state}"
+    return True, ""
+
+
+def _build_teleport_ticket_packets(item_id: str) -> List[str]:
+    item_hex = str(item_id or "").strip().lower()
+    if len(item_hex) != 12:
+        raise ValueError("传送券物品代码必须是 12 位 hex")
+    return [
+        item_use.build_use_item_packets(item_hex, 1)[0],
+        _TELEPORT_TICKET_PACKET_TEMPLATE.format(random_1=random_num_hex4(), random_2=random_num_hex4()),
+    ]
+
+
+def _get_enabled_rule(rid: str) -> Dict[str, Any] | None:
+    for rule in get_auto_use_rules():
+        if rule.get("id") == rid and rule.get("enabled"):
+            return rule
+    return None
+
+
+def run_pre_battle_actions() -> Dict[str, Any]:
+    from services.action_manager import send_raw_action
+
+    session = get_session()
+    auto_use_res = run_pending_auto_use_actions("battle_start_preflight")
+    if not auto_use_res.get("ok"):
+        return auto_use_res
+    actions = list(auto_use_res.get("actions", []))
+
+    rule = _get_enabled_rule("battle_teleport_ticket")
+    if not rule:
+        return {"ok": True, "actions": actions}
+    with session._lock:
+        if session.battle_preflight_teleport_used_once:
+            return {"ok": True, "actions": actions}
+
+    item_id = str(rule.get("item_id", "")).strip().lower()
+    if not item_id:
+        return {"ok": False, "error": "已启用传送券规则，但 item_id 为空"}
+
+    ok, err = item_use.optimistic_consume_item(item_id, 1)
+    if not ok:
+        return {"ok": False, "error": err}
+
+    for idx, packet_hex in enumerate(_build_teleport_ticket_packets(item_id), start=1):
+        res = send_raw_action(packet_hex, priority=10, use_queue=False)
+        if not res.get("ok"):
+            return res
+        actions.append({
+            "id": "battle_teleport_ticket",
+            "ok": True,
+            "item_id": item_id,
+            "item_name": rule.get("item_name", "传送券"),
+            "step": idx,
+            "validation_warning": res.get("validation_warning", ""),
+        })
+
+    with session._lock:
+        session.battle_preflight_teleport_used_once = True
+    session.notify_backpack_update()
+    session._notify_sse("auto_use", {"trigger": "battle_start_preflight", "actions": actions})
+    return {"ok": True, "actions": actions}
+
+
+def mark_battle_started(monster_code: str):
+    session = get_session()
+    wait_deadline = time.time() + DE07_TIMEOUT_S
+    with session._lock:
+        next_round = session.battle_round_seq + 1
+        if not session.battle_current_monster:
+            session.battle_current_monster = monster_code
+    _set_battle_state(
+        state=BATTLE_STATE_WAITING_START_RESPONSE,
+        in_progress=True,
+        current_monster=monster_code,
+        last_action="f603",
+        can_create_next=False,
+        round_seq=next_round,
+        last_result={},
+        mode="loop" if session.battle_loop_running else session.battle_mode,
+        wait_deadline_ts=wait_deadline,
+        next_start_ts=0.0,
+    )
+
+
+def mark_battle_error(reason: str):
+    _set_battle_state(
+        state=BATTLE_STATE_ERROR,
+        in_progress=False,
+        last_action="",
+        can_create_next=False,
+        last_result={"error": reason},
+        wait_deadline_ts=0.0,
+        next_start_ts=0.0,
+    )
+
+
+def reset_battle_state(*, preserve_loop: bool = False):
+    session = get_session()
+    with session._lock:
+        loop_running = session.battle_loop_running if preserve_loop else False
+        loop_monster_code = session.battle_loop_monster_code if preserve_loop else ""
+        loop_delay_ms = session.battle_loop_delay_ms if preserve_loop else 1900
+        battle_mode = session.battle_mode if preserve_loop and loop_running else "idle"
+        total_count = session.battle_total_count if preserve_loop else 0
+        total_exp = session.battle_total_exp if preserve_loop else 0
+        total_gold = session.battle_total_gold_copper if preserve_loop else 0
+        session.battle_loop_running = loop_running
+        session.battle_loop_monster_code = loop_monster_code
+        session.battle_loop_delay_ms = loop_delay_ms
+        session.battle_mode = battle_mode
+        session.battle_total_count = total_count
+        session.battle_total_exp = total_exp
+        session.battle_total_gold_copper = total_gold
+        session.battle_next_start_ts = 0.0
+    _set_battle_state(
+        state=BATTLE_STATE_IDLE,
+        in_progress=False,
+        current_monster=loop_monster_code if preserve_loop else "",
+        last_action="",
+        can_create_next=False,
+        last_response_ts=0.0,
+        round_seq=0,
+        last_result={},
+        mode=battle_mode,
+        wait_deadline_ts=0.0,
+        next_start_ts=0.0,
+    )
+
+
+def _send_next_f703(source: str) -> Dict[str, Any]:
+    from services.action_manager import send_raw_action
+
+    session = get_session()
+    with session._lock:
+        current_state = session.battle_state
+        current_monster = session.battle_current_monster
+        allowed = session.battle_can_create_next and current_state == BATTLE_STATE_WAITING_ACTION_RESULT
+    if not allowed:
+        return {"ok": False, "error": f"当前状态不允许自动发送 f703，state={current_state}", "source": source}
+
+    built = build_do_battle_packet()
+    res = send_raw_action(built["packet_hex"], priority=10, use_queue=True)
+    if not res.get("ok"):
+        mark_battle_error(res.get("error", "发送 f703 失败"))
+        return res
+
+    _set_battle_state(
+        state=BATTLE_STATE_WAITING_ACTION_RESULT,
+        in_progress=True,
+        current_monster=current_monster,
+        last_action="f703",
+        can_create_next=False,
+        last_result={"source": source, "sent": "f703", "random_num": built["random_num"]},
+        wait_deadline_ts=time.time() + F703_TIMEOUT_S,
+        next_start_ts=0.0,
+    )
+    return {"ok": True, **built, "source": source}
+
+
+def _base_battle_payload(packet_hex: str) -> Dict[str, Any]:
+    return {
         "fingerprint": packet_hex[8:20] if len(packet_hex) >= 20 else "",
-        "raw_text": text,
+        "raw_text": _decode_utf8_text(packet_hex),
     }
-    session._notify_sse("battle_response", payload)
+
+
+def parse_battle_response(packet_hex: str) -> Dict[str, Any]:
+    """解析 de07：提取 UTF-8 文本，并给出是否继续战斗的结构化结果。"""
+    session = get_session()
+    packet_hex_l = packet_hex.lower()
+    payload = _base_battle_payload(packet_hex)
+    text = payload["raw_text"]
+
+    has_reward = any(token in packet_hex_l for token in _BATTLE_END_HEX_TOKENS)
+    no_energy = _NEILI_NOT_ENOUGH_HEX_TOKEN in packet_hex_l or "内力不足" in text
+    battle_ended = _BATTLE_ENDED_HEX_TOKEN in packet_hex_l or "战斗已结束" in text
+    exp_match = re.search(r"(?:获得)?经验[：:+\s]*([0-9]+)", text)
+    gold = _parse_gold_to_copper(text)
+
+    payload.update(
+        {
+            "exp": int(exp_match.group(1)) if exp_match else None,
+            "gold": gold,
+            "has_reward": has_reward,
+            "no_energy": no_energy,
+            "is_end_confirmed": bool(has_reward or no_energy or battle_ended),
+            "end_reason": (
+                "reward" if has_reward else
+                "no_energy" if no_energy else
+                "battle_already_ended" if battle_ended else
+                ""
+            ),
+            "should_continue": not (has_reward or no_energy or battle_ended),
+            "packet_type": "de07",
+        }
+    )
+
+    with session._lock:
+        prev_state = session.battle_state
+        prev_round = session.battle_round_seq
+    now = time.time()
+
+    if payload["is_end_confirmed"]:
+        _set_battle_state(
+            state=BATTLE_STATE_ENDED,
+            in_progress=False,
+            last_action="",
+            can_create_next=False,
+            last_response_ts=now,
+            last_result=payload,
+        )
+    elif prev_state == BATTLE_STATE_WAITING_START_RESPONSE:
+        _set_battle_state(
+            state=BATTLE_STATE_WAITING_ACTION_RESULT,
+            in_progress=True,
+            last_action="de07",
+            can_create_next=True,
+            last_response_ts=now,
+            round_seq=prev_round,
+            last_result=payload,
+        )
+    elif prev_state == BATTLE_STATE_WAITING_ACTION_RESULT:
+        _set_battle_state(
+            state=BATTLE_STATE_WAITING_ACTION_RESULT,
+            in_progress=True,
+            last_action="de07",
+            can_create_next=True,
+            last_response_ts=now,
+            round_seq=prev_round,
+            last_result=payload,
+        )
+    else:
+        _set_battle_state(
+            state=prev_state,
+            in_progress=prev_state in (BATTLE_STATE_WAITING_START_RESPONSE, BATTLE_STATE_WAITING_ACTION_RESULT),
+            last_action="de07",
+            can_create_next=False,
+            last_response_ts=now,
+            round_seq=prev_round,
+            last_result=payload,
+        )
+
+    _emit_battle_state_with_payload("battle_response", payload)
     return payload
 
 
-def parse_battle_end(packet_hex: str) -> Dict:
-    """解析 df07：含经验/金币则战斗结束，否则判定未秒杀。"""
+def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
+    """解析 df07：只有命中明确结算信号才结束。"""
     session = get_session()
     packet_hex_l = packet_hex.lower()
-    text = _decode_utf8_text(packet_hex)
+    payload = _base_battle_payload(packet_hex)
+    text = payload["raw_text"]
     exp_match = re.search(r"(?:获得)?经验[：:+\s]*([0-9]+)", text)
     exp = int(exp_match.group(1)) if exp_match else None
     gold = _parse_gold_to_copper(text)
-
-    # 简化判定：命中指定 hex 片段即视为战斗结束
-    has_reward = any(token in packet_hex_l for token in _BATTLE_END_HEX_TOKENS)
-    no_energy = _NEILI_NOT_ENOUGH_HEX_TOKEN in packet_hex_l
-
-    # 仅在明确结算时结束战斗流程；否则保持进行中，等待前端继续发 f703
-    if has_reward or no_energy:
-        with session._lock:
-            session.battle_in_progress = False
+    has_reward = any(token in packet_hex_l for token in _BATTLE_END_HEX_TOKENS) or exp is not None or gold is not None
+    no_energy = _NEILI_NOT_ENOUGH_HEX_TOKEN in packet_hex_l or "内力不足" in text
+    battle_ended = _BATTLE_ENDED_HEX_TOKEN in packet_hex_l or "战斗已结束" in text
 
     stats_updated = update_session_stats(packet_hex)
-    payload = {
-        "fingerprint": packet_hex[8:20] if len(packet_hex) >= 20 else "",
-        "raw_text": text,
-        "exp": exp,
-        "gold": gold,
-        "has_reward": has_reward,
-        "no_energy": no_energy,
-        "stats_updated": stats_updated,
-    }
-    if has_reward:
-        session._notify_sse("battle_end", payload)
+    payload.update(
+        {
+            "exp": exp,
+            "gold": gold,
+            "has_reward": has_reward,
+            "no_energy": no_energy,
+            "stats_updated": stats_updated,
+            "is_end_confirmed": bool(has_reward or no_energy or battle_ended),
+            "end_reason": (
+                "reward" if has_reward else
+                "no_energy" if no_energy else
+                "battle_already_ended" if battle_ended else
+                ""
+            ),
+            "should_continue": not (has_reward or no_energy or battle_ended),
+            "packet_type": "df07",
+        }
+    )
+
+    with session._lock:
+        prev_state = session.battle_state
+        prev_round = session.battle_round_seq
+    now = time.time()
+
+    if payload["is_end_confirmed"]:
+        with session._lock:
+            session.battle_total_count += 1
+            if isinstance(payload.get("exp"), int):
+                session.battle_total_exp += int(payload["exp"])
+            if isinstance(payload.get("gold"), int):
+                session.battle_total_gold_copper += int(payload["gold"])
+        _set_battle_state(
+            state=BATTLE_STATE_ENDED,
+            in_progress=False,
+            last_action="",
+            can_create_next=False,
+            last_response_ts=now,
+            round_seq=prev_round,
+            last_result=payload,
+            wait_deadline_ts=0.0,
+        )
+        _emit_battle_state_with_payload("battle_end", payload)
     else:
-        session._notify_sse("battle_not_killed", payload)
+        _set_battle_state(
+            state=BATTLE_STATE_WAITING_ACTION_RESULT if prev_state == BATTLE_STATE_WAITING_ACTION_RESULT else prev_state,
+            in_progress=True,
+            last_action="df07",
+            can_create_next=True if prev_state == BATTLE_STATE_WAITING_ACTION_RESULT else False,
+            last_response_ts=now,
+            round_seq=prev_round,
+            last_result=payload,
+            wait_deadline_ts=0.0,
+        )
+        _emit_battle_state_with_payload("battle_not_killed", payload)
     return payload
 
 
-def mark_battle_started():
-    session = get_session()
-    with session._lock:
-        session.battle_in_progress = True
-        session.battle_last_retry_ts = 0.0
+def handle_battle_server_packet(packet_hex: str) -> Dict[str, Any]:
+    """统一处理战斗下行，并在允许时自动推进 f703。"""
+    fingerprint = packet_hex[8:20] if len(packet_hex) >= 20 else ""
+    if "de07" in fingerprint:
+        payload = parse_battle_response(packet_hex)
+    elif "df07" in fingerprint:
+        payload = parse_battle_end(packet_hex)
+    else:
+        return {"ok": False, "error": "非战斗报文"}
+
+    prepared_auto_use = None
+    if payload.get("is_end_confirmed"):
+        prepared_auto_use = prepare_auto_use_actions(f"battle_end:{payload.get('packet_type', '')}")
+
+    auto_sent = None
+    state = get_battle_state_snapshot().get("state")
+    if payload.get("should_continue") and state == BATTLE_STATE_WAITING_ACTION_RESULT:
+        auto_sent = _send_next_f703(payload.get("packet_type", ""))
+    elif payload.get("is_end_confirmed"):
+        session = get_session()
+        with session._lock:
+            loop_running = session.battle_loop_running
+            battle_mode = session.battle_mode
+            delay_ms = session.battle_loop_delay_ms
+        if loop_running:
+            _schedule_next_battle_round(delay_ms)
+        elif battle_mode == "single":
+            _set_battle_state(mode="idle", next_start_ts=0.0)
+    result = {"ok": True, "payload": payload}
+    if prepared_auto_use is not None:
+        result["prepared_auto_use"] = prepared_auto_use
+    if auto_sent is not None:
+        result["auto_sent"] = auto_sent
+    return result
 
 
 def use_auto_item(item_id: str) -> Dict[str, Any]:

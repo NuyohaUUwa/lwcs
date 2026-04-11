@@ -9,7 +9,10 @@ import queue
 import sys
 
 from flask import Flask, Response, jsonify, request, send_from_directory
-from flask_cors import CORS
+try:
+    from flask_cors import CORS
+except ModuleNotFoundError:  # 允许在未安装 flask-cors 的环境下降级启动
+    CORS = None
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -31,10 +34,20 @@ from services.data_manager import (
     upsert_buy_item,
     upsert_quick_login,
 )
-from services.flow_manager import disconnect_flow, fetch_roles_flow, login_flow, select_role_flow
+from services.flow_manager import (
+    disconnect_flow,
+    ensure_control_worker_running,
+    fetch_roles_flow,
+    login_flow,
+    select_role_flow,
+    set_auto_reconnect_enabled,
+)
 
 app = Flask(__name__, static_folder=None)
-CORS(app)
+if CORS is not None:
+    CORS(app)
+
+ensure_control_worker_running()
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
@@ -55,6 +68,18 @@ def static_files(path: str):
 @app.route("/api/status", methods=["GET"])
 def api_status():
     return jsonify(get_session().get_status())
+
+
+@app.route("/api/control-state", methods=["GET"])
+def api_control_state():
+    session = get_session()
+    return jsonify({"ok": True, "control_state": session.get_control_state(), "battle_state": session.get_status().get("battle_state", {})})
+
+
+@app.route("/api/control-config", methods=["PUT"])
+def api_control_config():
+    body = request.get_json(silent=True) or {}
+    return _json_ok(set_auto_reconnect_enabled(bool(body.get("auto_reconnect", False))))
 
 
 @app.route("/api/servers", methods=["GET"])
@@ -184,6 +209,18 @@ def api_battle_do():
 def api_battle_one_shot():
     body = request.get_json(silent=True) or {}
     return _json_ok(send_action("battle.one_shot", body))
+
+
+@app.route("/api/battle/loop/start", methods=["POST"])
+def api_battle_loop_start():
+    body = request.get_json(silent=True) or {}
+    return _json_ok(send_action("battle.loop.start", body))
+
+
+@app.route("/api/battle/loop/stop", methods=["POST"])
+def api_battle_loop_stop():
+    body = request.get_json(silent=True) or {}
+    return _json_ok(send_action("battle.loop.stop", body))
 
 
 @app.route("/api/battle/monsters", methods=["GET"])
@@ -348,6 +385,8 @@ def api_events():
     def generate():
         try:
             yield f"data: {json.dumps({'type': 'status', 'data': session.get_status()}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'control_state', 'data': session.get_control_state()}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'battle_state', 'data': session.get_status().get('battle_state', {})}, ensure_ascii=False)}\n\n"
             while True:
                 try:
                     payload = q.get(timeout=20)

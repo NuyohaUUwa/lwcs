@@ -9,7 +9,6 @@ import binascii
 from core.connector import send_and_receive_once, send_packet
 from core.session import get_session
 from features import battle, chat, item_use, teleport
-from features.packet_probe import record_packet
 
 
 def _ensure_connected() -> Dict[str, Any] | None:
@@ -55,7 +54,6 @@ def send_raw_action(
         return {"ok": False, "error": err}
     if warn:
         print(f"[action_manager] {warn}")
-    record_packet(clean_hex, direction_tag)
     try:
         sent_bytes = send_packet(clean_hex, priority=priority, use_queue=use_queue)
         result = {
@@ -83,12 +81,10 @@ def send_and_wait(packet_hex: str, *, timeout: float, matcher=None) -> dict:
         return {"ok": False, "error": err}
     if warn:
         print(f"[action_manager] {warn}")
-    record_packet(clean_hex, "UP")
     try:
         response = send_and_receive_once(clean_hex, recv_timeout=timeout)
         if not response:
             return {"ok": False, "error": "服务器无响应"}
-        record_packet(response, "DN")
         if matcher is not None and not matcher(response):
             return {"ok": False, "error": "响应不符合预期", "response_hex": response.hex()}
         result = {"ok": True, "response_bytes": response, "response_hex": response.hex()}
@@ -219,42 +215,42 @@ def dispatch_feature_action(action_name: str, payload: Dict[str, Any]) -> dict:
 
     if action_name == "battle.start":
         monster_code = str(payload.get("monster_code", "")).strip().lower()
-        try:
-            built = battle.build_start_battle_packet(monster_code)
-        except ValueError as e:
-            return {"ok": False, "error": str(e)}
-        res = send_raw_action(built["packet_hex"], priority=10, use_queue=True)
-        if not res.get("ok"):
-            return res
-        battle.mark_battle_started()
-        result = {"ok": True, "queued": 1, **built}
-        if res.get("validation_warning"):
-            result["validation_warning"] = res["validation_warning"]
-        return result
+        run_pre_battle_actions = bool(payload.get("run_pre_battle_actions", False))
+        return battle.start_single_battle(monster_code, run_pre_battle_actions=run_pre_battle_actions)
+
+    if action_name == "battle.loop.start":
+        monster_code = str(payload.get("monster_code", "")).strip().lower()
+        loop_delay_ms = int(payload.get("loop_delay_ms", 1900))
+        return battle.start_battle_loop(monster_code, loop_delay_ms=loop_delay_ms)
+
+    if action_name == "battle.loop.stop":
+        return battle.stop_battle_loop(str(payload.get("reason", "")).strip())
 
     if action_name == "battle.do":
+        ok, err = battle.can_manual_battle_do()
+        if not ok:
+            return {"ok": False, "error": err, "battle_state": battle.get_battle_state_snapshot()}
         built = battle.build_do_battle_packet()
         res = send_raw_action(built["packet_hex"], priority=10, use_queue=True)
         if not res.get("ok"):
             return res
-        result = {"ok": True, "queued": 1, **built}
+        battle._set_battle_state(
+            state=battle.BATTLE_STATE_WAITING_ACTION_RESULT,
+            in_progress=True,
+            last_action="f703",
+            can_create_next=False,
+            last_result={"source": "manual_api", "sent": "f703", "random_num": built["random_num"]},
+        )
+        result = {"ok": True, "queued": 1, **built, "battle_state": battle.get_battle_state_snapshot()}
         if res.get("validation_warning"):
             result["validation_warning"] = res["validation_warning"]
         return result
 
     if action_name == "battle.one_shot":
-        start_res = dispatch_feature_action("battle.start", payload)
-        if not start_res.get("ok"):
-            return start_res
-        fight_res = dispatch_feature_action("battle.do", payload)
-        if not fight_res.get("ok"):
-            return fight_res
-        return {
-            "ok": True,
-            "queued": 2,
-            "monster_code": start_res.get("monster_code"),
-            "random_num": start_res.get("random_num"),
-        }
+        return battle.start_single_battle(
+            str(payload.get("monster_code", "")).strip().lower(),
+            run_pre_battle_actions=bool(payload.get("run_pre_battle_actions", False)),
+        )
 
     if action_name == "teleport.go":
         destination = str(payload.get("destination", "")).strip()

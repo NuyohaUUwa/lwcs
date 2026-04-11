@@ -12,6 +12,7 @@ from typing import Callable, Optional
 
 from config import RECV_BUFSIZE, SEND_INTERVAL
 from core.session import get_session
+from features.packet_probe import record_packet
 
 
 def _get_connected_socket() -> socket.socket:
@@ -20,6 +21,16 @@ def _get_connected_socket() -> socket.socket:
     if not sock:
         raise ConnectionError("socket 不可用")
     return sock
+
+
+def _send_all(sock: socket.socket, data: bytes) -> int:
+    total_sent = 0
+    while total_sent < len(data):
+        sent = sock.send(data[total_sent:])
+        if sent <= 0:
+            raise ConnectionError("socket 发送失败")
+        total_sent += sent
+    return total_sent
 
 
 def open_connection(ip: str, port: int, timeout: float = 15.0) -> socket.socket:
@@ -64,7 +75,10 @@ def send_packet(hex_str: str, priority: int = 10, use_queue: bool = True) -> int
     data = binascii.unhexlify(clean_hex)
     with session._send_lock:
         sock = _get_connected_socket()
-        return sock.send(data)
+        sent_bytes = _send_all(sock, data)
+    if sent_bytes > 0:
+        record_packet(data, "UP")
+    return sent_bytes
 
 
 def send_and_receive_once(
@@ -78,7 +92,10 @@ def send_and_receive_once(
     try:
         sock.settimeout(recv_timeout)
         send_packet(packet_hex, use_queue=False)
-        return sock.recv(bufsize)
+        response = sock.recv(bufsize)
+        if response:
+            record_packet(response, "DN")
+        return response
     finally:
         sock.settimeout(old_timeout)
 
@@ -103,6 +120,8 @@ def connect_and_exchange(
         sock.settimeout(recv_timeout)
         send_packet(packet_hex, use_queue=False)
         response = sock.recv(bufsize)
+        if response:
+            record_packet(response, "DN")
         sock.settimeout(old_timeout)
         if not keep_open:
             close_connection()
@@ -171,6 +190,7 @@ def start_receive_loop(
                         if not stop_event.is_set() and on_error:
                             on_error(ConnectionResetError("服务器主动断开连接"))
                         break
+                    record_packet(data, "DN")
                     try:
                         on_packet(data)
                     except Exception as cb_err:
@@ -217,7 +237,9 @@ def start_send_worker(
                 data = binascii.unhexlify(hex_str)
                 with send_lock:
                     sock = _get_connected_socket()
-                    sock.send(data)
+                    sent_bytes = _send_all(sock, data)
+                if sent_bytes > 0:
+                    record_packet(data, "UP")
                 time.sleep(interval)
             except Exception as e:
                 print(f"[connector] send_worker 发送失败: {e}")

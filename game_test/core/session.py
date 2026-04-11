@@ -64,9 +64,12 @@ class GameSession:
 
         # ---- 账号 / 服务器 / 角色 ----
         self.account: Optional[str] = None
+        self.login_password: Optional[str] = None
+        self.login_server_name: Optional[str] = None
         self.server_name: Optional[str] = None
         self.server_ip: Optional[str] = None
         self.server_port: Optional[int] = None
+        self.reconnect_role_id: Optional[str] = None
         self.current_role: Optional[RoleInfo] = None
         self.available_roles: list = []
         self.announcement: str = ""
@@ -78,6 +81,39 @@ class GameSession:
 
         # ---- 心跳检测 ----
         self.last_recv_ts: float = 0.0
+
+        # ---- 战斗运行时 ----
+        self.battle_state: str = "idle"
+        self.battle_in_progress: bool = False
+        self.battle_current_monster: str = ""
+        self.battle_last_action: str = ""
+        self.battle_can_create_next: bool = False
+        self.battle_last_response_ts: float = 0.0
+        self.battle_round_seq: int = 0
+        self.battle_last_result: Dict[str, Any] = {}
+        self.battle_loop_running: bool = False
+        self.battle_loop_delay_ms: int = 1900
+        self.battle_loop_timer = None
+        self.battle_mode: str = "idle"
+        self.battle_loop_monster_code: str = ""
+        self.battle_wait_deadline_ts: float = 0.0
+        self.battle_next_start_ts: float = 0.0
+        self.battle_total_count: int = 0
+        self.battle_total_exp: int = 0
+        self.battle_total_gold_copper: int = 0
+        self.auto_use_pending_actions: list = []
+        self.battle_preflight_teleport_used_once: bool = False
+
+        # ---- 后端控制平面 ----
+        self.auto_reconnect_enabled: bool = False
+        self.reconnect_state: str = "idle"
+        self.reconnect_reason: str = ""
+        self.reconnect_attempts: int = 0
+        self.reconnect_max_attempts: int = 3
+        self.reconnect_last_error: str = ""
+        self.reconnect_next_retry_ts: float = 0.0
+        self.reconnect_banned_until_ts: float = 0.0
+        self.control_thread: Optional[threading.Thread] = None
 
         # ---- 报文日志 ----
         from config import PACKET_LOG_MAX
@@ -186,6 +222,59 @@ class GameSession:
     def notify_status_change(self):
         self._notify_sse("status", self.get_status())
 
+    def notify_battle_state(self):
+        self._notify_sse(
+            "battle_state",
+            {
+                "state": self.battle_state,
+                "in_progress": self.battle_in_progress,
+                "current_monster": self.battle_current_monster,
+                "last_action": self.battle_last_action,
+                "can_create_next": self.battle_can_create_next,
+                "last_response_ts": self.battle_last_response_ts,
+                "round_seq": self.battle_round_seq,
+                "last_result": dict(self.battle_last_result),
+                "mode": self.battle_mode,
+                "loop_running": self.battle_loop_running,
+                "loop_monster_code": self.battle_loop_monster_code,
+                "loop_delay_ms": self.battle_loop_delay_ms,
+                "wait_deadline_ts": self.battle_wait_deadline_ts,
+                "next_start_ts": self.battle_next_start_ts,
+                "total_count": self.battle_total_count,
+                "total_exp": self.battle_total_exp,
+                "total_gold_copper": self.battle_total_gold_copper,
+            },
+        )
+
+    def get_control_state(self) -> dict:
+        import time
+
+        now = time.time()
+        next_retry_in = None
+        if self.reconnect_next_retry_ts > 0:
+            next_retry_in = max(0.0, round(self.reconnect_next_retry_ts - now, 1))
+        banned_wait_in = None
+        if self.reconnect_banned_until_ts > 0:
+            banned_wait_in = max(0.0, round(self.reconnect_banned_until_ts - now, 1))
+        return {
+            "auto_reconnect_enabled": self.auto_reconnect_enabled,
+            "reconnect_state": self.reconnect_state,
+            "reconnect_reason": self.reconnect_reason,
+            "reconnect_attempts": self.reconnect_attempts,
+            "reconnect_max_attempts": self.reconnect_max_attempts,
+            "reconnect_last_error": self.reconnect_last_error,
+            "reconnect_next_retry_ts": self.reconnect_next_retry_ts,
+            "reconnect_next_retry_in": next_retry_in,
+            "reconnect_banned_until_ts": self.reconnect_banned_until_ts,
+            "reconnect_banned_wait_in": banned_wait_in,
+            "has_reconnect_context": bool(
+                self.account and self.login_password and self.login_server_name and self.server_ip and self.server_port and self.reconnect_role_id
+            ),
+        }
+
+    def notify_control_state(self):
+        self._notify_sse("control_state", self.get_control_state())
+
     # ------------------------------------------------------------------ #
     #  运行时清理                                                          #
     # ------------------------------------------------------------------ #
@@ -215,6 +304,26 @@ class GameSession:
             "role": self.current_role.to_dict() if self.current_role else None,
             "backpack_count": len(self.backpack_items),
             "last_recv_age": last_recv_age,
+            "control_state": self.get_control_state(),
+            "battle_state": {
+                "state": self.battle_state,
+                "in_progress": self.battle_in_progress,
+                "current_monster": self.battle_current_monster,
+                "last_action": self.battle_last_action,
+                "can_create_next": self.battle_can_create_next,
+                "last_response_ts": self.battle_last_response_ts,
+                "round_seq": self.battle_round_seq,
+                "last_result": dict(self.battle_last_result),
+                "mode": self.battle_mode,
+                "loop_running": self.battle_loop_running,
+                "loop_monster_code": self.battle_loop_monster_code,
+                "loop_delay_ms": self.battle_loop_delay_ms,
+                "wait_deadline_ts": self.battle_wait_deadline_ts,
+                "next_start_ts": self.battle_next_start_ts,
+                "total_count": self.battle_total_count,
+                "total_exp": self.battle_total_exp,
+                "total_gold_copper": self.battle_total_gold_copper,
+            },
         }
 
     def reset(self):
@@ -227,13 +336,48 @@ class GameSession:
             self.connected = False
             self.connection_status = "disconnected"
             self.session_id = None
+            self.account = None
+            self.login_password = None
+            self.login_server_name = None
+            self.server_name = None
+            self.server_ip = None
+            self.server_port = None
+            self.reconnect_role_id = None
             self.current_role = None
             self.available_roles = []
             self.backpack_items = {}
             self.role_stats = {}
             self.last_recv_ts = 0.0
+            self.battle_state = "idle"
+            self.battle_in_progress = False
+            self.battle_current_monster = ""
+            self.battle_last_action = ""
+            self.battle_can_create_next = False
+            self.battle_last_response_ts = 0.0
+            self.battle_round_seq = 0
+            self.battle_last_result = {}
+            self.battle_mode = "idle"
+            self.battle_loop_running = False
+            self.battle_loop_monster_code = ""
+            self.battle_loop_delay_ms = 1900
+            self.battle_loop_timer = None
+            self.battle_wait_deadline_ts = 0.0
+            self.battle_next_start_ts = 0.0
+            self.battle_total_count = 0
+            self.battle_total_exp = 0
+            self.battle_total_gold_copper = 0
+            self.auto_use_pending_actions = []
+            self.battle_preflight_teleport_used_once = False
+            self.reconnect_state = "idle"
+            self.reconnect_reason = ""
+            self.reconnect_attempts = 0
+            self.reconnect_last_error = ""
+            self.reconnect_next_retry_ts = 0.0
+            self.reconnect_banned_until_ts = 0.0
             self.clear_connection_runtime()
         self.notify_status_change()
+        self.notify_battle_state()
+        self.notify_control_state()
 
 
 _session: Optional[GameSession] = None

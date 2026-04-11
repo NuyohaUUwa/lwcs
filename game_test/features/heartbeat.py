@@ -8,7 +8,7 @@ import time
 
 from utils.random_num import random_num_hex4
 
-HEARTBEAT_SLEEP_S = 5
+HEARTBEAT_SLEEP_S = 10
 STALE_WARN_S = 60
 STALE_TIMEOUT_S = 90
 HEARTBEAT_PACKET_TEMPLATE = "12000000e8030a000a04{random_num}f5050704000000000000"
