@@ -6,6 +6,7 @@
 from typing import Any, Dict
 import binascii
 
+from config import DEFAULT_BATTLE_LOOP_DELAY_MS
 from core.connector import send_and_receive_once, send_packet
 from core.session import get_session
 from features import battle, chat, item_use, teleport
@@ -220,7 +221,7 @@ def dispatch_feature_action(action_name: str, payload: Dict[str, Any]) -> dict:
 
     if action_name == "battle.loop.start":
         monster_code = str(payload.get("monster_code", "")).strip().lower()
-        loop_delay_ms = int(payload.get("loop_delay_ms", 1900))
+        loop_delay_ms = int(payload.get("loop_delay_ms", DEFAULT_BATTLE_LOOP_DELAY_MS))
         return battle.start_battle_loop(monster_code, loop_delay_ms=loop_delay_ms)
 
     if action_name == "battle.loop.stop":

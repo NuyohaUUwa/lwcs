@@ -177,6 +177,33 @@ class LoopBattleReconnectTests(unittest.TestCase):
         self.assertEqual(session.reconnect_state, "idle")
         self.assertEqual(session.reconnect_next_retry_ts, 0.0)
 
+    def test_battle_wait_timeout_does_not_disconnect(self):
+        session = get_session()
+        now = time.time()
+        with session._lock:
+            session.connected = True
+            session.reconnect_state = "idle"
+            session.battle_state = battle.BATTLE_STATE_WAITING_ACTION_RESULT
+            session.battle_wait_deadline_ts = now - 1.0
+            session.battle_last_response_ts = 0.0
+            session.battle_loop_running = True
+
+        with patch.object(flow_manager, "_default_disconnect_handler") as disc, patch.object(
+            flow_manager, "recover_battle_wait_timeout_with_f703", return_value={"ok": True, "recover_count": 1}
+        ):
+            flow_manager._control_worker_tick(now)
+
+        disc.assert_not_called()
+
+    def test_recover_resets_counter_on_battle_de07_mark(self):
+        session = get_session()
+        with session._lock:
+            session.battle_f703_timeout_recover_count = 2
+        hex_body = "aa" * 10 + "030100de07" + "bb"
+        battle.handle_battle_server_packet(hex_body)
+        with session._lock:
+            self.assertEqual(session.battle_f703_timeout_recover_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -494,7 +494,7 @@
           </select>
           <span id="battle-current-monster">未选择</span>
           <span class="text-muted">启动延时(ms)：</span>
-          <input type="text" id="battle-loop-delay" value="1900" style="width:90px; padding:4px 8px; font-size:12px;">
+          <input type="text" id="battle-loop-delay" inputmode="numeric" placeholder="ms" autocomplete="off" style="width:90px; padding:4px 8px; font-size:12px;">
           <button id="btn-battle-loop" class="btn btn-success btn-sm" onclick="toggleBattleLoop()">开始循环战斗</button>
           <button class="btn btn-ghost btn-sm" onclick="triggerBattleOnce(true)">手动单次</button>
           <span class="text-muted" id="battle-stats">次数: 0 / 经验: - / 金币: -</span>

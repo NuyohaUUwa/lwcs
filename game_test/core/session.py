@@ -9,6 +9,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from config import DEFAULT_BATTLE_LOOP_DELAY_MS
+
 
 @dataclass
 class Item:
@@ -92,7 +94,7 @@ class GameSession:
         self.battle_round_seq: int = 0
         self.battle_last_result: Dict[str, Any] = {}
         self.battle_loop_running: bool = False
-        self.battle_loop_delay_ms: int = 1900
+        self.battle_loop_delay_ms: int = DEFAULT_BATTLE_LOOP_DELAY_MS
         self.battle_loop_timer = None
         self.battle_mode: str = "idle"
         self.battle_loop_monster_code: str = ""
@@ -103,6 +105,7 @@ class GameSession:
         self.battle_total_gold_copper: int = 0
         self.auto_use_pending_actions: list = []
         self.battle_preflight_teleport_used_once: bool = False
+        self.battle_f703_timeout_recover_count: int = 0
 
         # ---- 后端控制平面 ----
         self.auto_reconnect_enabled: bool = False
@@ -243,6 +246,7 @@ class GameSession:
                 "total_count": self.battle_total_count,
                 "total_exp": self.battle_total_exp,
                 "total_gold_copper": self.battle_total_gold_copper,
+                "f703_timeout_recover_count": self.battle_f703_timeout_recover_count,
             },
         )
 
@@ -304,6 +308,7 @@ class GameSession:
             "role": self.current_role.to_dict() if self.current_role else None,
             "backpack_count": len(self.backpack_items),
             "last_recv_age": last_recv_age,
+            "default_battle_loop_delay_ms": DEFAULT_BATTLE_LOOP_DELAY_MS,
             "control_state": self.get_control_state(),
             "battle_state": {
                 "state": self.battle_state,
@@ -323,6 +328,7 @@ class GameSession:
                 "total_count": self.battle_total_count,
                 "total_exp": self.battle_total_exp,
                 "total_gold_copper": self.battle_total_gold_copper,
+                "f703_timeout_recover_count": self.battle_f703_timeout_recover_count,
             },
         }
 
@@ -359,7 +365,7 @@ class GameSession:
             self.battle_mode = "idle"
             self.battle_loop_running = False
             self.battle_loop_monster_code = ""
-            self.battle_loop_delay_ms = 1900
+            self.battle_loop_delay_ms = DEFAULT_BATTLE_LOOP_DELAY_MS
             self.battle_loop_timer = None
             self.battle_wait_deadline_ts = 0.0
             self.battle_next_start_ts = 0.0
@@ -368,6 +374,7 @@ class GameSession:
             self.battle_total_gold_copper = 0
             self.auto_use_pending_actions = []
             self.battle_preflight_teleport_used_once = False
+            self.battle_f703_timeout_recover_count = 0
             self.reconnect_state = "idle"
             self.reconnect_reason = ""
             self.reconnect_attempts = 0

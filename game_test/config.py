@@ -30,3 +30,6 @@ RECV_BUFSIZE = 14048
 
 # 标注持久化文件路径（相对于 game_test 目录）
 ANNOTATIONS_FILE = "data/annotations.json"
+
+# 循环战斗「启动延时」仅作后端冷启动 / 未传参时的回退；实际值应由前端请求体传入 loop_delay_ms
+DEFAULT_BATTLE_LOOP_DELAY_MS = 1000

@@ -26,7 +26,9 @@ let selectedMonsterCode = '';
 let battleLogMode = 'simple'; // simple | detail
 let autoUseRules = [];
 let controlState = { auto_reconnect_enabled: false, reconnect_state: 'idle', reconnect_attempts: 0, reconnect_max_attempts: 3, reconnect_last_error: '', reconnect_next_retry_in: null, reconnect_banned_wait_in: null };
-let battleState = { state: 'idle', in_progress: false, mode: 'idle', loop_running: false, current_monster: '', loop_monster_code: '', loop_delay_ms: 1900, total_count: 0, total_exp: 0, total_gold_copper: 0 };
+/** 与后端 config.DEFAULT_BATTLE_LOOP_DELAY_MS 同步，由 /api/status 的 default_battle_loop_delay_ms 写入 */
+let serverDefaultBattleLoopDelayMs = null;
+let battleState = { state: 'idle', in_progress: false, mode: 'idle', loop_running: false, current_monster: '', loop_monster_code: '', loop_delay_ms: 0, total_count: 0, total_exp: 0, total_gold_copper: 0 };
 let lastStatusData = { connected: false, connection_status: 'disconnected', role: null, server_name: '' };
 
 // ================================================================== //
@@ -122,8 +124,17 @@ function updateBattleState(data) {
     selectedMonsterCode = String(battleState.loop_monster_code || '').toLowerCase();
   }
   const delayEl = document.getElementById('battle-loop-delay');
-  if (delayEl && Number.isFinite(Number(battleState.loop_delay_ms))) {
-    delayEl.value = String(battleState.loop_delay_ms);
+  if (delayEl) {
+    const v = Number(battleState.loop_delay_ms);
+    if (Number.isFinite(v) && v > 0) {
+      delayEl.value = String(Math.floor(v));
+    } else if (
+      serverDefaultBattleLoopDelayMs != null &&
+      Number.isFinite(serverDefaultBattleLoopDelayMs) &&
+      delayEl.value.trim() === ''
+    ) {
+      delayEl.value = String(serverDefaultBattleLoopDelayMs);
+    }
   }
   updateCurrentMonster();
   updateBattleStatsText();
@@ -198,6 +209,10 @@ function renderTopbarStatus(data) {
 
 function updateStatus(data) {
   lastStatusData = { ...lastStatusData, ...(data || {}) };
+  const d = data?.default_battle_loop_delay_ms;
+  if (Number.isFinite(Number(d)) && Number(d) >= 0) {
+    serverDefaultBattleLoopDelayMs = Math.floor(Number(d));
+  }
   isConnected = data.connected;
   prevConnected = isConnected;
   if (data.control_state) setControlState(data.control_state);
@@ -1137,9 +1152,17 @@ async function toggleBattleLoop() {
 
 function getBattleLoopDelayMs() {
   const el = document.getElementById('battle-loop-delay');
-  const n = Number((el?.value || '1900').trim());
-  if (!Number.isFinite(n) || n < 0) return 1900;
-  return Math.floor(n);
+  const raw = (el?.value || '').trim();
+  if (raw !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  if (serverDefaultBattleLoopDelayMs != null && Number.isFinite(serverDefaultBattleLoopDelayMs) && serverDefaultBattleLoopDelayMs >= 0) {
+    return Math.floor(serverDefaultBattleLoopDelayMs);
+  }
+  const bs = Number(battleState.loop_delay_ms);
+  if (Number.isFinite(bs) && bs > 0) return Math.floor(bs);
+  return 0;
 }
 
 function syncBattleLoopButton() {

@@ -15,12 +15,13 @@ from features.battle import (
     BATTLE_STATE_ENDED,
     BATTLE_STATE_WAITING_ACTION_RESULT,
     BATTLE_STATE_WAITING_START_RESPONSE,
+    MAX_F703_TIMEOUT_RECOVER,
     clear_battle_wait_deadline,
     get_battle_state_snapshot,
     get_wait_timeout_reason,
     handle_battle_server_packet,
     is_battle_wait_timed_out,
-    mark_battle_error,
+    recover_battle_wait_timeout_with_f703,
     reset_battle_state,
     schedule_loop_restart_after_reconnect,
     start_loop_battle_round,
@@ -254,14 +255,22 @@ def _control_worker_tick(now: float) -> None:
             _perform_backend_reconnect()
 
     if session.connected and is_battle_wait_timed_out(now):
-        clear_battle_wait_deadline()
         reason = get_wait_timeout_reason()
-        if battle_state.get("loop_running"):
-            _emit_control_log(f"{reason}，后端开始重连恢复", level="warn", scope="battle")
-            _default_disconnect_handler(Exception(reason))
+        clear_battle_wait_deadline()
+        res = recover_battle_wait_timeout_with_f703()
+        if res.get("ok"):
+            n = res.get("recover_count", 0)
+            _emit_control_log(
+                f"{reason}，已发送 f703 超时恢复（第 {n}/{MAX_F703_TIMEOUT_RECOVER} 次）",
+                level="warn",
+                scope="battle",
+            )
         else:
-            mark_battle_error(reason)
-            _emit_control_log(f"{reason}，当前非循环模式，不自动恢复", level="warn", scope="battle")
+            _emit_control_log(
+                f"{reason}，超时恢复未继续：{res.get('error', '')}",
+                level="warn",
+                scope="battle",
+            )
 
     next_start_ts = float(battle_state.get("next_start_ts") or 0.0)
     if (

@@ -12,6 +12,7 @@ import re
 import time
 from typing import Any, Dict, List
 
+from config import DEFAULT_BATTLE_LOOP_DELAY_MS
 from core.session import get_session
 from features import item_use
 from features.role_stats import update_session_stats
@@ -34,6 +35,10 @@ BATTLE_STATE_ERROR = "error"
 DE07_TIMEOUT_S = 3.0
 F703_TIMEOUT_S = 3.0
 BATTLE_WAIT_TIMEOUT_GRACE_S = 0.5
+
+# 战斗 de07 下行全包 hex 需包含此子串才视为目标响应，并清零 f703 超时补发计数
+BATTLE_DE07_HEX_MARK = "030100de07"
+MAX_F703_TIMEOUT_RECOVER = 3
 
 
 def _load_default_monsters() -> list:
@@ -351,6 +356,7 @@ def _build_battle_state_snapshot(session) -> Dict[str, Any]:
         "total_count": session.battle_total_count,
         "total_exp": session.battle_total_exp,
         "total_gold_copper": session.battle_total_gold_copper,
+        "f703_timeout_recover_count": session.battle_f703_timeout_recover_count,
     }
 
 
@@ -569,7 +575,7 @@ def get_wait_timeout_reason() -> str:
     session = get_session()
     with session._lock:
         if session.battle_state == BATTLE_STATE_WAITING_START_RESPONSE:
-            return "等待 de07 超时"
+            return "等待 f603 响应超时"
         if session.battle_state == BATTLE_STATE_WAITING_ACTION_RESULT:
             return "等待 f703 响应超时"
         return "战斗超时"
@@ -698,6 +704,7 @@ def mark_battle_started(monster_code: str):
     session = get_session()
     wait_deadline = time.time() + DE07_TIMEOUT_S
     with session._lock:
+        session.battle_f703_timeout_recover_count = 0
         next_round = session.battle_round_seq + 1
         if not session.battle_current_monster:
             session.battle_current_monster = monster_code
@@ -716,6 +723,9 @@ def mark_battle_started(monster_code: str):
 
 
 def mark_battle_error(reason: str):
+    session = get_session()
+    with session._lock:
+        session.battle_f703_timeout_recover_count = 0
     _set_battle_state(
         state=BATTLE_STATE_ERROR,
         in_progress=False,
@@ -732,7 +742,7 @@ def reset_battle_state(*, preserve_loop: bool = False):
     with session._lock:
         loop_running = session.battle_loop_running if preserve_loop else False
         loop_monster_code = session.battle_loop_monster_code if preserve_loop else ""
-        loop_delay_ms = session.battle_loop_delay_ms if preserve_loop else 1900
+        loop_delay_ms = session.battle_loop_delay_ms if preserve_loop else DEFAULT_BATTLE_LOOP_DELAY_MS
         battle_mode = session.battle_mode if preserve_loop and loop_running else "idle"
         total_count = session.battle_total_count if preserve_loop else 0
         total_exp = session.battle_total_exp if preserve_loop else 0
@@ -745,6 +755,7 @@ def reset_battle_state(*, preserve_loop: bool = False):
         session.battle_total_exp = total_exp
         session.battle_total_gold_copper = total_gold
         session.battle_next_start_ts = 0.0
+        session.battle_f703_timeout_recover_count = 0
     _set_battle_state(
         state=BATTLE_STATE_IDLE,
         in_progress=False,
@@ -788,6 +799,53 @@ def _send_next_f703(source: str) -> Dict[str, Any]:
         next_start_ts=0.0,
     )
     return {"ok": True, **built, "source": source}
+
+
+def recover_battle_wait_timeout_with_f703() -> Dict[str, Any]:
+    """战斗等待超时后补发 f703；最多 MAX_F703_TIMEOUT_RECOVER 次，满次则 mark_battle_error。"""
+    from services.action_manager import send_raw_action
+
+    session = get_session()
+    with session._lock:
+        current_state = session.battle_state
+        current_monster = session.battle_current_monster
+        recover_count = session.battle_f703_timeout_recover_count
+
+    if current_state not in (BATTLE_STATE_WAITING_START_RESPONSE, BATTLE_STATE_WAITING_ACTION_RESULT):
+        return {"ok": False, "error": f"当前状态不允许超时恢复发送 f703，state={current_state}"}
+
+    if recover_count >= MAX_F703_TIMEOUT_RECOVER:
+        mark_battle_error(
+            f"已达 {MAX_F703_TIMEOUT_RECOVER} 次 f703 超时重试，仍未收到含 {BATTLE_DE07_HEX_MARK} 的 de07"
+        )
+        return {"ok": False, "error": "f703 超时重试已达上限"}
+
+    built = build_do_battle_packet()
+    res = send_raw_action(built["packet_hex"], priority=10, use_queue=True)
+    if not res.get("ok"):
+        mark_battle_error(res.get("error", "发送 f703 失败"))
+        return res
+
+    with session._lock:
+        session.battle_f703_timeout_recover_count = recover_count + 1
+        new_count = session.battle_f703_timeout_recover_count
+
+    _set_battle_state(
+        state=BATTLE_STATE_WAITING_ACTION_RESULT,
+        in_progress=True,
+        current_monster=current_monster,
+        last_action="f703",
+        can_create_next=False,
+        last_result={
+            "source": "wait_timeout_recover",
+            "sent": "f703",
+            "random_num": built["random_num"],
+            "timeout_recover_index": new_count,
+        },
+        wait_deadline_ts=time.time() + F703_TIMEOUT_S,
+        next_start_ts=0.0,
+    )
+    return {"ok": True, **built, "recover_count": new_count}
 
 
 def _base_battle_payload(packet_hex: str) -> Dict[str, Any]:
@@ -952,6 +1010,10 @@ def handle_battle_server_packet(packet_hex: str) -> Dict[str, Any]:
     """统一处理战斗下行，并在允许时自动推进 f703。"""
     fingerprint = packet_hex[8:20] if len(packet_hex) >= 20 else ""
     if "de07" in fingerprint:
+        if BATTLE_DE07_HEX_MARK in packet_hex.lower():
+            session = get_session()
+            with session._lock:
+                session.battle_f703_timeout_recover_count = 0
         payload = parse_battle_response(packet_hex)
     elif "df07" in fingerprint:
         payload = parse_battle_end(packet_hex)
