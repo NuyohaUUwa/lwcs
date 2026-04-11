@@ -7,13 +7,13 @@
 """
 
 import json
-import os
 import re
 import time
 from typing import Any, Dict, List
 
 from config import DEFAULT_BATTLE_LOOP_DELAY_MS
 from core.session import get_session
+from paths import AUTO_USE_RULES_FILE, MONSTERS_FILE
 from features import item_use
 from features.role_stats import update_session_stats
 from utils.random_num import random_num_hex4
@@ -42,10 +42,9 @@ MAX_F703_TIMEOUT_RECOVER = 3
 
 
 def _load_default_monsters() -> list:
-    """从 data/monsters.json 加载默认怪物列表。"""
-    data_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "monsters.json")
+    """从 paths.MONSTERS_FILE 加载默认怪物列表。"""
     try:
-        with open(data_file, "r", encoding="utf-8") as f:
+        with open(MONSTERS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, list):
             out = []
@@ -79,7 +78,6 @@ _TELEPORT_TICKET_PACKET_TEMPLATE = (
     "12000000e80302000504{random_1}f5050204000000000000"
     "1c000000e80303003e28{random_2}f605452800000a0000005d000000000000000000"
 )
-AUTO_USE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "auto_use_rules.json")
 
 
 def _normalize_hex4(value: str, name: str) -> str:
@@ -139,7 +137,7 @@ def _parse_auto_use_rules_list(raw: List[Any]) -> List[Dict[str, Any]]:
 
 def _load_auto_use_rules() -> List[Dict[str, Any]]:
     try:
-        with open(AUTO_USE_FILE, "r", encoding="utf-8") as f:
+        with open(AUTO_USE_RULES_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
         if not isinstance(raw, list):
             raise ValueError("rules must be list")
@@ -150,7 +148,7 @@ def _load_auto_use_rules() -> List[Dict[str, Any]]:
 
 
 def _save_auto_use_rules(rules: List[Dict[str, Any]]) -> None:
-    with open(AUTO_USE_FILE, "w", encoding="utf-8") as f:
+    with open(AUTO_USE_RULES_FILE, "w", encoding="utf-8") as f:
         json.dump(rules, f, ensure_ascii=False, indent=2)
 
 

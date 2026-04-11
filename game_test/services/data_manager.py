@@ -9,12 +9,7 @@ import time
 
 from features.battle import DEFAULT_MONSTERS
 from core.session import get_session
-
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-MONSTERS_FILE = os.path.join(DATA_DIR, "monsters.json")
-QUICK_LOGINS_FILE = os.path.join(DATA_DIR, "quick_logins.json")
-BUY_ITEMS_FILE = os.path.join(DATA_DIR, "buy_items.json")
+from paths import BUY_ITEMS_FILE, MONSTERS_FILE, QUICK_LOGINS_FILE
 
 
 def _read_json_file(path: str, default):

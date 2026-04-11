@@ -11,10 +11,7 @@ import os
 import threading
 import time
 
-
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-PACKET_LOG_DIR = os.path.join(DATA_DIR, "packet_logs")
+from paths import PACKET_LOG_DIR
 MAX_PACKET_LOG_FILES = 10
 
 _log_lock = threading.Lock()

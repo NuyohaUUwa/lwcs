@@ -3,13 +3,9 @@
 """
 
 import json
-import os
 
+from paths import TELEPORT_DESTINATIONS_FILE as DESTINATIONS_FILE
 from utils.random_num import random_num_hex4
-
-
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-DESTINATIONS_FILE = os.path.join(BASE_DIR, "data", "teleport_destination.json")
 _TELEPORT_PACKET_TEMPLATE = "18000000e80303004428{random_num}f5054728000006000000{destination}0000"
 
 

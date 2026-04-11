@@ -17,15 +17,12 @@ from typing import Optional, Dict, Any
 
 from core.codec import extract_utf8_segments, extract_packet_fingerprint
 from core.session import get_session
+from paths import FINGERPRINTS_FILE as _FINGERPRINTS_FILE
 from services.packet_log_service import append_packet_record
 
 # ------------------------------------------------------------------ #
-#  指纹描述表（内置 + 用户新增，持久化到 data/fingerprints.json）        #
+#  指纹描述表（内置 + 用户新增，持久化到 paths.FINGERPRINTS_FILE）        #
 # ------------------------------------------------------------------ #
-
-_FINGERPRINTS_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "data", "fingerprints.json"
-)
 
 # 内置默认指纹（文件不存在或被误删时使用）
 _DEFAULT_FINGERPRINTS: Dict[str, str] = {
