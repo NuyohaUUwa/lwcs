@@ -27,7 +27,8 @@ from services.packet_log_service import append_packet_record
 # 内置默认指纹（文件不存在或被误删时使用）
 _DEFAULT_FINGERPRINTS: Dict[str, str] = {
     "e8030100ec07": "背包变化/已使用礼包",
-    "e8030100ed07": "获得物品",
+    "e8030100ed07": "获得物品/属性刷新",
+    "e8030100e207": "战斗结算经验金币",
     "e8030100f207": "世界频道/系统公告",
     "e80301005151": "物品信息片段",
     "e8030100d607": "背包物品列表",

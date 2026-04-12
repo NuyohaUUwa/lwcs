@@ -4,6 +4,7 @@
 2) 服务端状态机驱动后续战斗（f703）
 3) 解析服务器战斗响应（de07）
 4) 解析服务器战斗结束（df07）
+5) 解析战斗结算经验/金币（e8030100e207）
 """
 
 import json
@@ -300,40 +301,35 @@ def _decode_utf8_text(packet_hex: str) -> str:
 
 def _parse_gold_to_copper(text: str):
     """
-    将“获得金币: 1金2银3铜 / 17铜 / 5银”等转换为铜单位总数。
-    金:银:铜 = 1000:1000:1
+    将「获得金币」后的片段解析为总铜数。
+    金:银:铜 = 1,000,000 铜 : 1,000 铜 : 1 铜。
+    注意：不能用「金 in text」判断单位，否则「金币」会误判为带「金」单位。
     """
-    m = re.search(r"(?:获得)?金币[：:]\s*([0-9]+)?(?:金)?\s*([0-9]+)?(?:银)?\s*([0-9]+)?(?:铜)?", text)
+    m = re.search(r"(?:获得)?金币\s*[：:]\s*([^\r\n]+)", text)
     if not m:
         return None
-
-    has_jin = "金" in text
-    has_yin = "银" in text
-    has_tong = "铜" in text
-    if not (has_jin or has_yin or has_tong):
-        return None
-
-    nums = [int(x) for x in re.findall(r"([0-9]+)", m.group(0))]
-    if not nums:
+    tail = m.group(1).strip()
+    if not tail:
         return None
 
     jin = yin = tong = 0
-    if has_jin and has_yin and has_tong and len(nums) >= 3:
-        jin, yin, tong = nums[0], nums[1], nums[2]
-    elif has_jin and has_yin and len(nums) >= 2:
-        jin, yin = nums[0], nums[1]
-    elif has_jin and has_tong and len(nums) >= 2:
-        jin, tong = nums[0], nums[1]
-    elif has_yin and has_tong and len(nums) >= 2:
-        yin, tong = nums[0], nums[1]
-    elif has_jin:
-        jin = nums[0]
-    elif has_yin:
-        yin = nums[0]
-    else:
-        tong = nums[0]
+    mj = re.search(r"(\d+)\s*金(?!币)", tail)
+    my = re.search(r"(\d+)\s*银", tail)
+    mt = re.search(r"(\d+)\s*铜", tail)
+    if mj:
+        jin = int(mj.group(1))
+    if my:
+        yin = int(my.group(1))
+    if mt:
+        tong = int(mt.group(1))
+    if mj or my or mt:
+        return jin * 1000 * 1000 + yin * 1000 + tong
 
-    return jin * 1000 * 1000 + yin * 1000 + tong
+    mp = re.fullmatch(r"(\d+)", tail)
+    if mp:
+        return int(mp.group(1))
+
+    return None
 
 
 def _build_battle_state_snapshot(session) -> Dict[str, Any]:
@@ -944,23 +940,20 @@ def parse_battle_response(packet_hex: str) -> Dict[str, Any]:
 
 
 def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
-    """解析 df07：只有命中明确结算信号才结束。"""
+    """解析 df07：经验/金币已改由 e207 承载；此处不再解析数值。"""
     session = get_session()
     packet_hex_l = packet_hex.lower()
     payload = _base_battle_payload(packet_hex)
     text = payload["raw_text"]
-    exp_match = re.search(r"(?:获得)?经验[：:+\s]*([0-9]+)", text)
-    exp = int(exp_match.group(1)) if exp_match else None
-    gold = _parse_gold_to_copper(text)
-    has_reward = any(token in packet_hex_l for token in _BATTLE_END_HEX_TOKENS) or exp is not None or gold is not None
+    has_reward = any(token in packet_hex_l for token in _BATTLE_END_HEX_TOKENS)
     no_energy = _NEILI_NOT_ENOUGH_HEX_TOKEN in packet_hex_l or "内力不足" in text
     battle_ended = _BATTLE_ENDED_HEX_TOKEN in packet_hex_l or "战斗已结束" in text
 
     stats_updated = update_session_stats(packet_hex)
     payload.update(
         {
-            "exp": exp,
-            "gold": gold,
+            "exp": None,
+            "gold": None,
             "has_reward": has_reward,
             "no_energy": no_energy,
             "stats_updated": stats_updated,
@@ -984,10 +977,6 @@ def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
     if payload["is_end_confirmed"]:
         with session._lock:
             session.battle_total_count += 1
-            if isinstance(payload.get("exp"), int):
-                session.battle_total_exp += int(payload["exp"])
-            if isinstance(payload.get("gold"), int):
-                session.battle_total_gold_copper += int(payload["gold"])
         _set_battle_state(
             state=BATTLE_STATE_ENDED,
             in_progress=False,
@@ -1011,6 +1000,39 @@ def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
             wait_deadline_ts=0.0,
         )
         _emit_battle_state_with_payload("battle_not_killed", payload)
+    return payload
+
+
+def handle_battle_settlement_e207(packet_hex: str) -> Dict[str, Any]:
+    """解析 e8030100e207：战斗结算经验/金币等；有数值则累加 battle_total_*。"""
+    session = get_session()
+    packet_hex_l = packet_hex.lower()
+    text = _decode_utf8_text(packet_hex)
+    exp_match = re.search(r"(?:获得)?经验[：:+\s]*([0-9]+)", text)
+    exp = int(exp_match.group(1)) if exp_match else None
+    gold = _parse_gold_to_copper(text)
+    has_reward = (
+        any(token in packet_hex_l for token in _BATTLE_END_HEX_TOKENS)
+        or exp is not None
+        or gold is not None
+    )
+    now = time.time()
+    payload: Dict[str, Any] = {
+        "fingerprint": packet_hex[8:20] if len(packet_hex) >= 20 else "",
+        "raw_text": text,
+        "exp": exp,
+        "gold": gold,
+        "has_reward": has_reward,
+        "packet_type": "e207",
+    }
+    if has_reward and (exp is not None or gold is not None):
+        with session._lock:
+            if isinstance(exp, int):
+                session.battle_total_exp += exp
+            if isinstance(gold, int):
+                session.battle_total_gold_copper += gold
+    _set_battle_state(last_response_ts=now, last_result=payload)
+    _emit_battle_state_with_payload("battle_settlement_e207", payload)
     return payload
 
 

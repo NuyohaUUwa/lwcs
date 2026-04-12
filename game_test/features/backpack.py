@@ -9,6 +9,7 @@ from typing import Optional
 
 from core.codec import find_all_positions
 from core.session import get_session, Item
+from features.role_stats import merge_role_stats_from_packet
 
 
 # 背包物品指纹类型映射
@@ -123,6 +124,7 @@ def _parse_embedded_obtained_packets(packet_hex: str):
             break
         sub_packet = packet_hex[idx - 8:]
         _parse_item_obtained(sub_packet)
+        merge_role_stats_from_packet(sub_packet)
         start = idx + len(marker)
 
 

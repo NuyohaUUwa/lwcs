@@ -89,6 +89,7 @@ function startSSE() {
       else if (msg.type === 'role_stats') renderRoleStats(msg.data);
       else if (msg.type === 'battle_response') onBattleResponse(msg.data);
       else if (msg.type === 'battle_end') onBattleEnd(msg.data);
+      else if (msg.type === 'battle_settlement_e207') onBattleSettlementE207(msg.data);
       else if (msg.type === 'battle_not_killed') onBattleNotKilled(msg.data);
       else if (msg.type === 'battle_state') onBattleState(msg.data);
       else if (msg.type === 'control_log') onControlLog(msg.data);
@@ -1042,7 +1043,7 @@ function onControlLog(data) {
 
 function appendBattlePacketLine(record) {
   const fp = (record.fingerprint || '').toLowerCase();
-  const watch = ['e8030500f603', 'e8030500f703', 'e8030100de07', 'e8030100df07'];
+  const watch = ['e8030500f603', 'e8030500f703', 'e8030100de07', 'e8030100df07', 'e8030100e207'];
   if (!watch.includes(fp)) return;
   if (battleLogMode !== 'detail') return;
   appendBattleLog({
@@ -1061,14 +1062,22 @@ function onBattleEnd(data) {
     appendBattleLog({ raw_text: '内力不足' }, 'end');
     return;
   }
-  const resultGold = formatGoldFromCopper(
-    (typeof data?.gold === 'number') ? data.gold : (parseGoldToCopperFromText(String(data?.raw_text || '')) || 0)
-  );
+  const n = Number(data?.battle_state?.total_count || battleState.total_count || 0);
+  appendBattleLog({ raw_text: `第${n}次 战斗结束（经验/金币以 e207 结算包为准）` }, 'end');
+}
+
+function onBattleSettlementE207(data) {
+  updateBattleState(data?.battle_state || {});
+  const raw = String(data?.raw_text || '');
+  const gCopper = (typeof data?.gold === 'number')
+    ? data.gold
+    : (parseGoldToCopperFromText(raw) ?? 0);
+  const resultGold = formatGoldFromCopper(gCopper);
   const resultExp = (typeof data?.exp === 'number')
     ? data.exp
-    : Number((String(data?.raw_text || '').match(/(?:获得)?经验[：:+\s]*([0-9]+)/)?.[1] || 0));
+    : Number((raw.match(/(?:获得)?经验[：:+\s]*([0-9]+)/)?.[1] || 0));
   appendBattleLog({
-    raw_text: `第${Number(data?.battle_state?.total_count || battleState.total_count || 0)}次 / 本次获得经验${resultExp} / 获得金币${resultGold}`
+    raw_text: `结算(e207) 本次经验 ${resultExp} / 金币 ${resultGold}`,
   }, 'end');
 }
 
@@ -1088,18 +1097,23 @@ function updateBattleStatsText() {
 }
 
 function parseGoldToCopperFromText(text) {
-  // 支持：17铜 / 2银 / 1金2银3铜
-  const match = String(text).match(/(?:获得)?金币[：:]\s*([0-9]+金)?\s*([0-9]+银)?\s*([0-9]+铜)?/);
-  if (!match) return null;
-  const getNum = (s) => {
-    const m = (s || '').match(/([0-9]+)/);
-    return m ? Number(m[1]) : 0;
-  };
-  const jin = getNum(match[1]);
-  const yin = getNum(match[2]);
-  const tong = getNum(match[3]);
-  if (!match[1] && !match[2] && !match[3]) return null;
-  return jin * 1000 * 1000 + yin * 1000 + tong;
+  // 与后端一致：「金币」一词不误判为「金」单位；支持仅铜、仅数字（铜）
+  const s = String(text);
+  const m = s.match(/(?:获得)?金币\s*[：:]\s*([^\r\n]+)/);
+  if (!m) return null;
+  const tail = m[1].trim();
+  if (!tail) return null;
+  const mj = tail.match(/(\d+)\s*金(?!币)/);
+  const my = tail.match(/(\d+)\s*银/);
+  const mt = tail.match(/(\d+)\s*铜/);
+  let jin = 0; let yin = 0; let tong = 0;
+  if (mj) jin = Number(mj[1]);
+  if (my) yin = Number(my[1]);
+  if (mt) tong = Number(mt[1]);
+  if (mj || my || mt) return jin * 1000000 + yin * 1000 + tong;
+  const mp = tail.match(/^(\d+)$/);
+  if (mp) return Number(mp[1]);
+  return null;
 }
 
 function formatGoldFromCopper(copper) {

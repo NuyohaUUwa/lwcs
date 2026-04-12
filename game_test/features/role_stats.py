@@ -1,8 +1,7 @@
 """
-角色属性解析：从 d607 选角响应包中提取角色战斗属性。
+角色属性解析：从下行 TLV 区提取「属性名：属性值」（全角冒号）。
 
-报文中属性以 [2字节LE长度][UTF-8内容] 格式编码，
-内容格式为 "属性名\uff1a属性值"（全角冒号 U+FF1A）。
+常见承载指纹：d607（背包/选角）、e8030100ed07（获得物品/属性刷新等）。
 """
 
 from typing import Dict
@@ -21,8 +20,8 @@ _STAT_SET = set(STAT_NAMES)
 
 # 属性分组，用于前端分区展示
 STAT_GROUPS = {
-    '基础属性': ['力量', '智力', '敏捷', '体质', '速度'],
-    '战斗属性': ['物攻', '物防', '法攻', '法防', '命中', '躲闪', '暴击'],
+    '基础属性': ['力量', '智力', '敏捷', '体质'],
+    '战斗属性': ['物攻', '物防', '法攻', '法防', '命中', '躲闪', '暴击', '速度'],
     '角色信息': ['等级', '职业', '声望', '积分'],
     '其他信息': ['月VIP', '周VIP', '任务积分', '金库次数', '珍珑宝库次数',
                '经验UP', '攻击UP', '金钱UP', '回血', '回蓝'],
@@ -31,7 +30,7 @@ STAT_GROUPS = {
 
 def parse_role_stats(packet_hex: str) -> Dict[str, str]:
     """
-    从 d607 报文的 hex 字符串中提取角色属性键值对。
+    从报文 hex 中提取角色属性键值对（与指纹无关，按正文 TLV 扫描）。
     使用 [2字节LE长度][UTF-8内容] 格式逐段扫描，提取包含全角冒号的条目。
 
     Returns:
@@ -73,7 +72,7 @@ def parse_role_stats(packet_hex: str) -> Dict[str, str]:
 
 def update_session_stats(packet_hex: str) -> bool:
     """
-    解析报文并更新 GameSession.role_stats，广播 SSE 事件。
+    解析报文并整表替换 GameSession.role_stats（如 d607 全量属性），广播 SSE。
     返回 True 表示成功解析到属性数据。
     """
     stats = parse_role_stats(packet_hex)
@@ -85,6 +84,29 @@ def update_session_stats(packet_hex: str) -> bool:
         session.role_stats = stats
     session._notify_sse("role_stats", {
         "stats": stats,
+        "groups": STAT_GROUPS,
+        "order": STAT_NAMES,
+    })
+    return True
+
+
+def merge_role_stats_from_packet(packet_hex: str) -> bool:
+    """
+    若报文中含已知角色属性 TLV，则合并写入 session（仅覆盖解析到的键）。
+    无属性内容时不改 session、不广播。用于 e8030100ed07 等。
+    """
+    stats = parse_role_stats(packet_hex)
+    if not stats:
+        return False
+
+    session = get_session()
+    with session._lock:
+        merged = dict(session.role_stats)
+        merged.update(stats)
+        session.role_stats = merged
+        out = dict(merged)
+    session._notify_sse("role_stats", {
+        "stats": out,
         "groups": STAT_GROUPS,
         "order": STAT_NAMES,
     })

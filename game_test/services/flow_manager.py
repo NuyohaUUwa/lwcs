@@ -21,6 +21,7 @@ from features.battle import (
     get_battle_state_snapshot,
     get_wait_timeout_reason,
     handle_battle_server_packet,
+    handle_battle_settlement_e207,
     is_battle_wait_timed_out,
     recover_battle_wait_timeout_with_f703,
     reset_battle_state,
@@ -30,7 +31,7 @@ from features.battle import (
 )
 from features.heartbeat import start_heartbeat
 from features.login import build_login_packet, parse_login_response
-from features.role_stats import update_session_stats
+from features.role_stats import merge_role_stats_from_packet, update_session_stats
 from features.roles import (
     build_enter_game_extra_packet,
     build_role_list_packet,
@@ -385,6 +386,13 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
     if "d607" in fingerprint:
         dispatch_backpack_packet(hex_str)
         update_session_stats(hex_str)
+        return
+    if "ed07" in fingerprint:
+        dispatch_backpack_packet(hex_str)
+        merge_role_stats_from_packet(hex_str)
+        return
+    if "e207" in fingerprint:
+        handle_battle_settlement_e207(hex_str)
         return
     if "de07" in fingerprint:
         handle_battle_server_packet(hex_str)
