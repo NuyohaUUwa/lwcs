@@ -11,6 +11,7 @@ import time
 from typing import Callable, Optional
 
 from config import RECV_BUFSIZE, SEND_INTERVAL
+from core.codec import split_game_frame_bytes
 from core.session import get_session
 from features.packet_probe import record_packet
 
@@ -44,6 +45,7 @@ def open_connection(ip: str, port: int, timeout: float = 15.0) -> socket.socket:
         session.sock = sock
         session.server_ip = ip
         session.server_port = port
+        session.recv_framing_buffer = b""
         return sock
     except Exception as e:
         raise ConnectionError(f"连接 {ip}:{port} 失败: {e}") from e
@@ -88,14 +90,18 @@ def send_and_receive_once(
 ) -> bytes:
     """在当前连接上发送一次并同步接收一次响应。"""
     sock = _get_connected_socket()
+    session = get_session()
     old_timeout = sock.gettimeout()
     try:
         sock.settimeout(recv_timeout)
         send_packet(packet_hex, use_queue=False)
-        response = sock.recv(bufsize)
-        if response:
-            record_packet(response, "DN")
-        return response
+        chunk = sock.recv(bufsize) or b""
+        combined = session.recv_framing_buffer + chunk
+        frames, rest = split_game_frame_bytes(combined)
+        session.recv_framing_buffer = rest
+        for frame in frames:
+            record_packet(frame, "DN")
+        return b"".join(frames)
     finally:
         sock.settimeout(old_timeout)
 
@@ -115,13 +121,16 @@ def connect_and_exchange(
     keep_open=True 时连接保留给后续流程；否则自动关闭。
     """
     sock = open_connection(ip, port, timeout=connect_timeout)
+    session = get_session()
     try:
         old_timeout = sock.gettimeout()
         sock.settimeout(recv_timeout)
         send_packet(packet_hex, use_queue=False)
-        response = sock.recv(bufsize)
-        if response:
-            record_packet(response, "DN")
+        chunk = sock.recv(bufsize) or b""
+        frames, rest = split_game_frame_bytes(chunk)
+        for frame in frames:
+            record_packet(frame, "DN")
+        response = b"".join(frames) + rest
         sock.settimeout(old_timeout)
         if not keep_open:
             close_connection()
@@ -182,19 +191,24 @@ def start_receive_loop(
 
     def _loop():
         sock.settimeout(1.0)
+        session = get_session()
         try:
             while not stop_event.is_set():
                 try:
-                    data = sock.recv(RECV_BUFSIZE)
-                    if not data:
+                    chunk = sock.recv(RECV_BUFSIZE)
+                    if not chunk:
                         if not stop_event.is_set() and on_error:
                             on_error(ConnectionResetError("服务器主动断开连接"))
                         break
-                    record_packet(data, "DN")
-                    try:
-                        on_packet(data)
-                    except Exception as cb_err:
-                        print(f"[connector] on_packet 回调异常: {cb_err}")
+                    combined = session.recv_framing_buffer + chunk
+                    frames, rest = split_game_frame_bytes(combined)
+                    session.recv_framing_buffer = rest
+                    for data in frames:
+                        record_packet(data, "DN")
+                        try:
+                            on_packet(data)
+                        except Exception as cb_err:
+                            print(f"[connector] on_packet 回调异常: {cb_err}")
                 except socket.timeout:
                     continue
                 except socket.error as se:

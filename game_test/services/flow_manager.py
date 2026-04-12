@@ -8,6 +8,7 @@ import time
 from typing import Callable, Dict
 
 from config import GAME_SERVERS, LOGIN_SERVERS
+from core.codec import split_game_frame_bytes
 from core.connector import connect_and_exchange, open_connection, start_connection_runtime, stop_connection_runtime
 from core.session import RoleInfo, get_session
 from features.backpack import dispatch_backpack_packet
@@ -368,8 +369,8 @@ def _default_disconnect_handler(error: Exception):
             _emit_control_log(f"连接断开：{error}；后端将自动恢复", level="warn", scope="reconnect")
 
 
-def handle_incoming_packet(raw_bytes: bytes) -> None:
-    """统一下行分发入口。"""
+def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
+    """处理一条已按长度头对齐的完整下行报文。"""
     if not raw_bytes:
         return
 
@@ -392,6 +393,18 @@ def handle_incoming_packet(raw_bytes: bytes) -> None:
         handle_battle_server_packet(hex_str)
         return
     dispatch_backpack_packet(hex_str)
+
+
+def handle_incoming_packet(raw_bytes: bytes) -> None:
+    """统一下行分发入口；同一 recv 内多条粘包时逐条解析。"""
+    if not raw_bytes:
+        return
+    session = get_session()
+    frames, rest = split_game_frame_bytes(raw_bytes)
+    if rest:
+        session.recv_framing_buffer = session.recv_framing_buffer + rest
+    for frame in frames:
+        _dispatch_single_incoming_packet(frame)
 
 
 def login_flow(account: str, password: str, server_name: str) -> dict:

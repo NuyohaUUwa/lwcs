@@ -84,6 +84,9 @@ class GameSession:
         # ---- 心跳检测 ----
         self.last_recv_ts: float = 0.0
 
+        # ---- TCP 收包拼帧（多条报文一次 recv / 半包跨 recv）----
+        self.recv_framing_buffer: bytes = b""
+
         # ---- 战斗运行时 ----
         self.battle_state: str = "idle"
         self.battle_in_progress: bool = False
@@ -292,6 +295,7 @@ class GameSession:
         self.recv_thread = None
         self.send_thread = None
         self.heartbeat_thread = None
+        self.recv_framing_buffer = b""
 
     # ------------------------------------------------------------------ #
     #  状态查询                                                            #
@@ -354,6 +358,7 @@ class GameSession:
             self.backpack_items = {}
             self.role_stats = {}
             self.last_recv_ts = 0.0
+            self.recv_framing_buffer = b""
             self.battle_state = "idle"
             self.battle_in_progress = False
             self.battle_current_monster = ""

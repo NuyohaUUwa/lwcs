@@ -6,7 +6,10 @@
 import binascii
 import re
 import struct
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
+
+# 与 services.action_manager._validate_packet_hex 一致：首 4 字节 LE 为 L，整包长度 = L + 4
+_MAX_GAME_FRAME_BYTES = 512 * 1024
 
 
 def find_all_positions(text: str, pattern: str) -> List[int]:
@@ -78,6 +81,39 @@ def extract_utf8_segments(hex_str: str, min_len: int = 3) -> str:
 def extract_packet_fingerprint(packet_hex: str) -> str:
     """返回报文指纹：hex[8:20]。"""
     return packet_hex[8:20] if len(packet_hex) >= 20 else packet_hex
+
+
+def split_game_frame_bytes(
+    data: bytes,
+    *,
+    max_frame_bytes: int = _MAX_GAME_FRAME_BYTES,
+) -> Tuple[List[bytes], bytes]:
+    """
+    将 TCP 缓冲区拆成若干条完整游戏报文，以及末尾可能不完整的半包。
+
+    单条报文：前 4 字节小端无符号整数为 L，本条总字节数 = L + 4
+    （与发包校验逻辑一致）。返回 (完整帧列表, 剩余待拼数据)。
+    """
+    frames: List[bytes] = []
+    if not data:
+        return frames, b""
+
+    i = 0
+    n = len(data)
+    while i < n:
+        if i + 4 > n:
+            return frames, data[i:]
+        length_field = int.from_bytes(data[i : i + 4], "little")
+        total = length_field + 4
+        if total < 4 or total > max_frame_bytes:
+            # 无法对齐到合法长度头时单字节滑动，避免永久卡死
+            i += 1
+            continue
+        if i + total > n:
+            return frames, data[i:]
+        frames.append(data[i : i + total])
+        i += total
+    return frames, b""
 
 
 def parse_frame(hex_data: str) -> Dict[str, Any]:

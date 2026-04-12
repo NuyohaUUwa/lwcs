@@ -83,6 +83,15 @@ KNOWN_FINGERPRINTS = _fingerprints  # 同一对象引用
 # 初始化时加载
 _load_fingerprints()
 
+# 写入 packet_log / 会话 jsonl 时排除的指纹（与 heartbeat.HEARTBEAT_PACKET_TEMPLATE、fingerprints 表一致）
+_PACKET_LOG_SKIP_FINGERPRINTS: frozenset[str] = frozenset(
+    {
+        "e8030100514f",  # 服务器心跳（下行）
+        "e8030a000a04",  # 客户端心跳模板 e8030a000a04（上行；偶见与业务同批下行）
+        "e80302000504",  # 另一路客户端心跳（fingerprints.json）
+    }
+)
+
 
 # ------------------------------------------------------------------ #
 #  数据结构                                                             #
@@ -174,10 +183,11 @@ def try_parse_packet(raw_hex: str) -> Optional[Dict[str, Any]]:
 #  记录 & 指纹描述存储                                                  #
 # ------------------------------------------------------------------ #
 
-def record_packet(raw_bytes_or_hex, direction: str) -> PacketRecord:
+def record_packet(raw_bytes_or_hex, direction: str) -> Optional[PacketRecord]:
     """
     记录一条报文（上行或下行），自动解析并追加到 session 的 packet_log。
     annotation 字段从指纹描述表自动填入。
+    心跳类报文不写内存日志与 jsonl，返回 None。
     """
     if isinstance(raw_bytes_or_hex, bytes):
         raw_hex = raw_bytes_or_hex.hex()
@@ -185,6 +195,8 @@ def record_packet(raw_bytes_or_hex, direction: str) -> PacketRecord:
         raw_hex = raw_bytes_or_hex.lower().replace(" ", "")
 
     fingerprint = extract_packet_fingerprint(raw_hex)
+    if fingerprint in _PACKET_LOG_SKIP_FINGERPRINTS:
+        return None
     parsed = try_parse_packet(raw_hex)
     record_id = _next_id()
 

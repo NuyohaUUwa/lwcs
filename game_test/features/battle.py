@@ -23,7 +23,7 @@ _BATTLE_START_TEMPLATE = "1b000000e8030500f603{seq}f505fc030000090000000100{mons
 
 # 进行战斗（群体技能）包
 _BATTLE_SKILL_PACKET_TEMPLATE = (
-    "22000000e8030500f703{random_num}f50504040000100000000100cb00000000000000030001020000"
+    "22000000e8030500f703{random_num}f50504040000100000000100{skill_job_hex}00000000000000030001020000"
 )
 
 BATTLE_STATE_IDLE = "idle"
@@ -615,8 +615,18 @@ def build_start_battle_packet(monster_code: str) -> Dict[str, Any]:
 def build_do_battle_packet() -> Dict[str, Any]:
     """构造进行战斗报文。"""
     random_num = random_num_hex4()
+    session = get_session()
+    with session._lock:
+        job = (session.current_role.role_job if session.current_role else "") or ""
+    job = str(job).strip()
+    if job == "侠客":
+        skill_job_hex = "03"
+    elif job == "刺客":
+        skill_job_hex = "66"
+    else:
+        skill_job_hex = "cb"
     return {
-        "packet_hex": _BATTLE_SKILL_PACKET_TEMPLATE.format(random_num=random_num),
+        "packet_hex": _BATTLE_SKILL_PACKET_TEMPLATE.format(random_num=random_num, skill_job_hex=skill_job_hex),
         "random_num": random_num,
     }
 
