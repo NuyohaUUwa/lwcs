@@ -119,6 +119,7 @@ def connect_and_exchange(
     """
     打开连接、发送一次、接收一次。
     keep_open=True 时连接保留给后续流程；否则自动关闭。
+    返回值仅为拼帧后的完整报文字节串拼接，不含 TCP 半包；半包写入 recv_framing_buffer（仅 keep_open 时保留）。
     """
     sock = open_connection(ip, port, timeout=connect_timeout)
     session = get_session()
@@ -127,10 +128,15 @@ def connect_and_exchange(
         sock.settimeout(recv_timeout)
         send_packet(packet_hex, use_queue=False)
         chunk = sock.recv(bufsize) or b""
-        frames, rest = split_game_frame_bytes(chunk)
+        combined = session.recv_framing_buffer + chunk
+        frames, rest = split_game_frame_bytes(combined)
+        if keep_open:
+            session.recv_framing_buffer = rest
+        else:
+            session.recv_framing_buffer = b""
         for frame in frames:
             record_packet(frame, "DN")
-        response = b"".join(frames) + rest
+        response = b"".join(frames)
         sock.settimeout(old_timeout)
         if not keep_open:
             close_connection()

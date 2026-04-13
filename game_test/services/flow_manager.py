@@ -411,14 +411,26 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
     dispatch_backpack_packet(hex_str)
 
 
-def handle_incoming_packet(raw_bytes: bytes) -> None:
-    """统一下行分发入口；同一 recv 内多条粘包时逐条解析。"""
+def handle_incoming_packet(raw_bytes: bytes, *, already_framed: bool = False) -> None:
+    """
+    统一下行分发入口。
+
+    already_framed=True：由收包线程传入的已是完整游戏帧，直接交给 _dispatch_single_incoming_packet，
+    不得再拼 recv_framing_buffer 或二次 split（connector 已拆帧）。
+
+    already_framed=False：原始 TCP 负载（可能多帧/半帧），先与会话 recv_framing_buffer 拼接再 split，
+    与 connector 收包语义一致（如选角响应 send_and_wait 的 response_bytes）。
+    """
     if not raw_bytes:
         return
+    if already_framed:
+        _dispatch_single_incoming_packet(raw_bytes)
+        return
+
     session = get_session()
-    frames, rest = split_game_frame_bytes(raw_bytes)
-    if rest:
-        session.recv_framing_buffer = session.recv_framing_buffer + rest
+    combined = session.recv_framing_buffer + raw_bytes
+    frames, rest = split_game_frame_bytes(combined)
+    session.recv_framing_buffer = rest
     for frame in frames:
         _dispatch_single_incoming_packet(frame)
 
@@ -563,7 +575,10 @@ def select_role_flow(role_id: str) -> dict:
         session.reconnect_banned_until_ts = 0.0
         _set_status("connected")
 
-        runtime = start_connection_runtime(handle_incoming_packet, _default_disconnect_handler)
+        runtime = start_connection_runtime(
+            lambda data: handle_incoming_packet(data, already_framed=True),
+            _default_disconnect_handler,
+        )
         heartbeat_thread = start_heartbeat(
             runtime["stop_event"],
             on_timeout=lambda: _default_disconnect_handler(Exception("心跳超时：服务器长时间无响应")),
