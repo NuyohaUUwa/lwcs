@@ -7,7 +7,7 @@ import queue
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from config import DEFAULT_BATTLE_LOOP_DELAY_MS
 
@@ -140,6 +140,28 @@ class GameSession:
     def update_item(self, item: Item):
         with self._lock:
             self.backpack_items[item.item_id] = item
+
+    def replace_backpack_items(self, items: Dict[str, Item]) -> None:
+        """以权威快照整体替换背包（如 d607 全量列表）。"""
+        with self._lock:
+            self.backpack_items = dict(items)
+
+    def apply_optimistic_obtain_items(self, items: Iterable[Item]) -> bool:
+        """
+        ec07 / ed07 / e607 等乐观合并：数量>0 时可 upsert（含从零新增）；
+        数量<=0 时不新增，若已有该 item_id 则移除。
+        """
+        changed = False
+        with self._lock:
+            for item in items:
+                if item.quantity <= 0:
+                    if item.item_id in self.backpack_items:
+                        del self.backpack_items[item.item_id]
+                        changed = True
+                    continue
+                self.backpack_items[item.item_id] = item
+                changed = True
+        return changed
 
     def remove_item(self, item_id: str):
         with self._lock:
