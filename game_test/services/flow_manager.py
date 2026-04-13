@@ -21,7 +21,6 @@ from features.battle import (
     get_battle_state_snapshot,
     get_wait_timeout_reason,
     handle_battle_server_packet,
-    handle_battle_settlement_e207,
     is_battle_wait_timed_out,
     recover_battle_wait_timeout_with_f703,
     reset_battle_state,
@@ -392,7 +391,7 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
         merge_role_stats_from_packet(hex_str)
         return
     if "e207" in fingerprint:
-        handle_battle_settlement_e207(hex_str)
+        handle_battle_server_packet(hex_str)
         return
     if "de07" in fingerprint:
         handle_battle_server_packet(hex_str)

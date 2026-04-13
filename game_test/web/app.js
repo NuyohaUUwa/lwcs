@@ -1063,12 +1063,16 @@ function onBattleEnd(data) {
     return;
   }
   const n = Number(data?.battle_state?.total_count || battleState.total_count || 0);
-  appendBattleLog({ raw_text: `第${n}次 战斗结束（经验/金币以 e207 结算包为准）` }, 'end');
+  appendBattleLog({ raw_text: `第${n}次 战斗结束` }, 'end');
 }
 
 function onBattleSettlementE207(data) {
   updateBattleState(data?.battle_state || {});
   const raw = String(data?.raw_text || '');
+  if (raw.includes('失去') || data?.outcome === 'defeat') {
+    appendBattleLog({ raw_text: `结算：失败 — ${raw}` }, 'end');
+    return;
+  }
   const gCopper = (typeof data?.gold === 'number')
     ? data.gold
     : (parseGoldToCopperFromText(raw) ?? 0);
@@ -1076,8 +1080,12 @@ function onBattleSettlementE207(data) {
   const resultExp = (typeof data?.exp === 'number')
     ? data.exp
     : Number((raw.match(/(?:获得)?经验[：:+\s]*([0-9]+)/)?.[1] || 0));
+  if (data?.outcome === 'victory' || raw.includes('获得')) {
+    const n = Number(data?.battle_state?.total_count || battleState.total_count || 0);
+    appendBattleLog({ raw_text: `第${n}次 战斗结束` }, 'end');
+  }
   appendBattleLog({
-    raw_text: `结算(e207) 本次经验 ${resultExp} / 金币 ${resultGold}`,
+    raw_text: `结算：本次获得经验 ${resultExp} / 金币 ${resultGold}`,
   }, 'end');
 }
 
