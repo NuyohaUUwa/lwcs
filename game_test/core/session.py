@@ -80,6 +80,8 @@ class GameSession:
         # ---- 背包 / 属性 ----
         self.backpack_items: Dict[str, Item] = {}
         self.role_stats: Dict[str, str] = {}
+        # 战斗正式结束后，下一条含 ed07 指纹的下行包优先按「全量属性」解析并整表替换 role_stats（见 flow_manager）
+        self.role_stats_full_refresh_on_next_ed07: bool = False
 
         # ---- 心跳检测 ----
         self.last_recv_ts: float = 0.0
@@ -379,6 +381,7 @@ class GameSession:
             self.available_roles = []
             self.backpack_items = {}
             self.role_stats = {}
+            self.role_stats_full_refresh_on_next_ed07 = False
             self.last_recv_ts = 0.0
             self.recv_framing_buffer = b""
             self.battle_state = "idle"

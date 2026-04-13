@@ -220,8 +220,8 @@ function updateStatus(data) {
   if (data.battle_state) updateBattleState(data.battle_state);
 
   if (isConnected) {
-    // 加载角色属性
-    api('GET', '/api/role-stats').then(r => { if (r.ok && r.stats) renderRoleStats(r); });
+    // 加载角色属性（先拉取，可能为空；renderRoleStats 会铺完整骨架并用报文逐步填充）
+    api('GET', '/api/role-stats').then(r => { if (r.ok) renderRoleStats(r); });
     // 启动心跳轮询（已连接时每 20s 刷新一次状态以更新心跳年龄）
     _startHeartbeatPoll();
   }
@@ -271,12 +271,15 @@ function hasRenderableRoleStats(stats) {
 }
 
 async function waitForRoleStatsReady(timeoutMs = RECONNECT_ROLE_STATS_TIMEOUT_MS) {
+  renderRoleStats({ stats: {}, groups: ROLE_STAT_GROUPS, order: ROLE_STAT_ORDER });
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const res = await api('GET', '/api/role-stats').catch(() => null);
-    if (res?.ok && hasRenderableRoleStats(res.stats)) {
+    if (res?.ok) {
       renderRoleStats(res);
-      return { ok: true, stats: res.stats };
+      if (hasRenderableRoleStats(res.stats)) {
+        return { ok: true, stats: res.stats };
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, RECONNECT_ROLE_STATS_POLL_MS));
   }
@@ -523,6 +526,9 @@ async function enterGame() {
     await saveQuickLoginEntry(res.role || null);
     // 进游戏成功：隐藏角色面板，顶栏已显示角色信息
     document.getElementById('role-panel').style.display = 'none';
+    // 选角成功后尽快展示属性面板骨架（顶栏「已连接」仍由后续 status/SSE 驱动）
+    renderRoleStats({ stats: {}, groups: ROLE_STAT_GROUPS, order: ROLE_STAT_ORDER });
+    api('GET', '/api/role-stats').then((r) => { if (r?.ok) renderRoleStats(r); }).catch(() => {});
   } else {
     document.getElementById('btn-enter').disabled = false;
     showMsg('role-msg', res.error || '进入游戏失败', 'err');
@@ -558,6 +564,7 @@ function resetToLoginState() {
   document.getElementById('role-badge').textContent = '—';
   document.getElementById('btn-disconnect').style.display = 'none';
   document.getElementById('role-stats-panel').classList.remove('visible');
+  document.getElementById('stats-content').innerHTML = '<span class="text-muted">等待数据...</span>';
   renderBackpack([]);
 }
 
@@ -1624,6 +1631,22 @@ function escAttr(s) {
 // ================================================================== //
 //  角色属性                                                            //
 // ================================================================== //
+// 与 game_test/features/role_stats.py 中 STAT_GROUPS / STAT_NAMES 保持一致
+const ROLE_STAT_GROUPS = {
+  角色信息: ['等级', '职业', '声望', '积分'],
+  基础属性: ['力量', '智力', '敏捷', '体质'],
+  战斗属性: ['物攻', '物防', '法攻', '法防', '命中', '躲闪', '暴击', '速度'],
+  其他信息: ['月VIP', '周VIP', '任务积分', '金库次数', '珍珑宝库次数', '经验UP', '攻击UP', '金钱UP', '回血', '回蓝'],
+};
+const ROLE_STAT_GROUP_ORDER = ['角色信息', '基础属性', '战斗属性', '其他信息'];
+const ROLE_STAT_ORDER = [
+  '力量', '智力', '敏捷', '体质',
+  '物攻', '物防', '法攻', '法防',
+  '命中', '躲闪', '暴击', '速度',
+  '等级', '职业', '声望', '积分',
+  '月VIP', '周VIP', '任务积分', '金库次数', '珍珑宝库次数',
+  '经验UP', '攻击UP', '金钱UP', '回血', '回蓝',
+];
 
 let statsCollapsed = false;
 
@@ -1635,28 +1658,23 @@ function toggleStatsPanel() {
 
 function renderRoleStats(data) {
   const stats = data.stats || {};
-  const groups = data.groups || {};
-  const order = data.order || [];
-
-  if (!Object.keys(stats).length) {
-    document.getElementById('stats-content').innerHTML = '<span class="text-muted">暂无数据</span>';
-    return;
-  }
+  const groups = (data.groups && Object.keys(data.groups).length) ? data.groups : ROLE_STAT_GROUPS;
 
   document.getElementById('role-stats-panel').classList.add('visible');
 
-  // 展示分组
-  const groupOrder = ['基础属性', '战斗属性', '角色信息', '其他信息'];
   let html = '';
-  for (const groupName of groupOrder) {
-    const keys = groups[groupName] || [];
-    const rows = keys.filter(k => stats[k] !== undefined);
-    if (!rows.length) continue;
+  for (const groupName of ROLE_STAT_GROUP_ORDER) {
+    const keys = groups[groupName];
+    if (!keys || !keys.length) continue;
     html += `<div class="stats-group"><div class="stats-group-title">${escHtml(groupName)}</div><div class="stats-grid">`;
-    for (const k of rows) {
-      const v = stats[k] || '';
-      const isHighlight = ['等级', '职业'].includes(k);
-      html += `<div class="stat-row"><span class="stat-name">${escHtml(k)}</span><span class="stat-value${isHighlight ? ' highlight' : ''}">${escHtml(v)}</span></div>`;
+    for (const k of keys) {
+      const raw = stats[k];
+      const has = raw !== undefined && raw !== null && String(raw).length > 0;
+      const v = has ? String(raw) : '';
+      const isHighlight = has && ['等级', '职业'].includes(k);
+      const valueClass = has ? `stat-value${isHighlight ? ' highlight' : ''}` : 'stat-value stat-pending';
+      const valueText = has ? escHtml(v) : '—';
+      html += `<div class="stat-row"><span class="stat-name">${escHtml(k)}</span><span class="${valueClass}">${valueText}</span></div>`;
     }
     html += '</div></div>';
   }

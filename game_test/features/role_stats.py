@@ -1,13 +1,20 @@
 """
-角色属性解析：从下行 TLV 区提取「属性名：属性值」（全角冒号）。
+角色属性：从下行报文 hex 解析已知属性，写入会话并经 SSE 推送到前端。
 
-常见承载指纹：d607（背包/选角）、e8030100ed07（获得物品/属性刷新等）。
+自报文字节偏移 0x004B 起，按「小端 uint16 长度 + UTF-8 负载」的 LV/TLV 链逐项读取。
+某一项若长度越界或 UTF-8 无法严格解码，则仅将当前读指针前移 1 字节，再尝试下一项。
+负载文本内可出现多个「属性名：值」（全角或半角冒号），由 extract_stat_pairs_from_text 拆键。
 """
 
+from __future__ import annotations
+
+import re
 from typing import Dict
+
 from core.session import get_session
 
-# 需要提取并展示的属性名（按显示顺序）
+ROLE_STATS_LV_OFFSET = 0x004B
+
 STAT_NAMES = [
     '力量', '智力', '敏捷', '体质',
     '物攻', '物防', '法攻', '法防',
@@ -16,85 +23,103 @@ STAT_NAMES = [
     '月VIP', '周VIP', '任务积分', '金库次数', '珍珑宝库次数',
     '经验UP', '攻击UP', '金钱UP', '回血', '回蓝',
 ]
-_STAT_SET = set(STAT_NAMES)
 
-# 属性分组，用于前端分区展示
 STAT_GROUPS = {
+    '角色信息': ['等级', '职业', '声望', '积分'],
     '基础属性': ['力量', '智力', '敏捷', '体质'],
     '战斗属性': ['物攻', '物防', '法攻', '法防', '命中', '躲闪', '暴击', '速度'],
-    '角色信息': ['等级', '职业', '声望', '积分'],
-    '其他信息': ['月VIP', '周VIP', '任务积分', '金库次数', '珍珑宝库次数',
-               '经验UP', '攻击UP', '金钱UP', '回血', '回蓝'],
+    '其他信息': [
+        '月VIP', '周VIP', '任务积分', '金库次数', '珍珑宝库次数',
+        '经验UP', '攻击UP', '金钱UP', '回血', '回蓝',
+    ],
 }
+
+_STAT_NAME_ALT = '|'.join(re.escape(n) for n in sorted(STAT_NAMES, key=len, reverse=True))
+_STAT_PAIR_RE = re.compile(rf'({_STAT_NAME_ALT})(?:\uff1a|:(?=\s*\S))')
+
+
+def _normalize_text(s: str) -> str:
+    return s.replace('\x00', '').replace('\ufeff', '').strip()
+
+
+def extract_stat_pairs_from_text(text: str) -> Dict[str, str]:
+    """
+    从一段 UTF-8 解码后的文本中取出所有已知属性键值对。
+    同一段内多个「力量：8857 智力：2450」按长名优先的正则依次切分。
+    """
+    text = _normalize_text(text)
+    if not text:
+        return {}
+    if '\uff1a' not in text and ':' not in text:
+        return {}
+
+    matches = list(_STAT_PAIR_RE.finditer(text))
+    if not matches:
+        return {}
+
+    out: Dict[str, str] = {}
+    for j, m in enumerate(matches):
+        name = m.group(1)
+        start = m.end()
+        end = matches[j + 1].start() if j + 1 < len(matches) else len(text)
+        out[name] = text[start:end].strip()
+    return out
 
 
 def parse_role_stats(packet_hex: str) -> Dict[str, str]:
     """
-    从报文 hex 中提取角色属性键值对（与指纹无关，按正文 TLV 扫描）。
-    使用 [2字节LE长度][UTF-8内容] 格式逐段扫描，提取包含全角冒号的条目。
-
-    Returns:
-        {'力量': '983', '智力': '583', ...}  或空 dict（解析失败）
+    从 offset 0x004B 起读取 LV 链：uint16 LE 长度 + 定长 UTF-8 负载；合并各负载中解析出的属性。
+    无法解码当前位置时 i += 1 再试（对齐前导控制字节）。
     """
     try:
         data = bytes.fromhex(packet_hex)
     except Exception:
         return {}
 
-    stats: Dict[str, str] = {}
-    i = 0
-    found_start = False  # 是否已经遇到 "力量"
+    if len(data) < ROLE_STATS_LV_OFFSET + 2:
+        return {}
 
-    while i < len(data) - 2:
-        length = int.from_bytes(data[i:i + 2], 'little')
-        if 1 <= length <= 120 and i + 2 + length <= len(data):
-            chunk = data[i + 2: i + 2 + length]
-            try:
-                text = chunk.decode('utf-8')
-                if '\uff1a' in text:
-                    name, _, value = text.partition('\uff1a')
-                    name = name.strip()
-                    value = value.strip()
-                    if name in _STAT_SET:
-                        found_start = True
-                        stats[name] = value
-                    elif found_start and name:
-                        # 遇到不在集合中的属性，说明已过属性区段
-                        pass
-                    i += 2 + length
-                    continue
-            except (UnicodeDecodeError, ValueError):
-                pass
-        i += 1
+    stats: Dict[str, str] = {}
+    i = ROLE_STATS_LV_OFFSET
+
+    while i + 2 <= len(data):
+        length = int.from_bytes(data[i : i + 2], 'little')
+        end = i + 2 + length
+
+        if length < 1 or end > len(data):
+            i += 1
+            continue
+
+        chunk = data[i + 2 : end]
+        try:
+            text = chunk.decode('utf-8')
+        except UnicodeDecodeError:
+            i += 1
+            continue
+
+        stats.update(extract_stat_pairs_from_text(text))
+        i = end
 
     return stats
 
 
 def update_session_stats(packet_hex: str) -> bool:
-    """
-    解析报文并整表替换 GameSession.role_stats（如 d607 全量属性），广播 SSE。
-    返回 True 表示成功解析到属性数据。
-    """
     stats = parse_role_stats(packet_hex)
     if not stats:
         return False
 
     session = get_session()
     with session._lock:
-        session.role_stats = stats
-    session._notify_sse("role_stats", {
-        "stats": stats,
-        "groups": STAT_GROUPS,
-        "order": STAT_NAMES,
+        session.role_stats = dict(stats)
+    session._notify_sse('role_stats', {
+        'stats': dict(stats),
+        'groups': STAT_GROUPS,
+        'order': STAT_NAMES,
     })
     return True
 
 
 def merge_role_stats_from_packet(packet_hex: str) -> bool:
-    """
-    若报文中含已知角色属性 TLV，则合并写入 session（仅覆盖解析到的键）。
-    无属性内容时不改 session、不广播。用于 e8030100ed07 等。
-    """
     stats = parse_role_stats(packet_hex)
     if not stats:
         return False
@@ -105,9 +130,9 @@ def merge_role_stats_from_packet(packet_hex: str) -> bool:
         merged.update(stats)
         session.role_stats = merged
         out = dict(merged)
-    session._notify_sse("role_stats", {
-        "stats": out,
-        "groups": STAT_GROUPS,
-        "order": STAT_NAMES,
+    session._notify_sse('role_stats', {
+        'stats': out,
+        'groups': STAT_GROUPS,
+        'order': STAT_NAMES,
     })
     return True

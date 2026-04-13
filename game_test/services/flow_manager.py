@@ -358,6 +358,7 @@ def _default_disconnect_handler(error: Exception):
     reset_battle_state(preserve_loop=preserve_loop)
     with session._lock:
         session.role_stats = {}
+        session.role_stats_full_refresh_on_next_ed07 = False
     session.connected = False
     session.connection_status = "disconnected"
     session.stop_runtime()
@@ -388,7 +389,15 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
         return
     if "ed07" in fingerprint:
         dispatch_backpack_packet(hex_str)
-        merge_role_stats_from_packet(hex_str)
+        with session._lock:
+            full_next = session.role_stats_full_refresh_on_next_ed07
+        if full_next:
+            if not update_session_stats(hex_str):
+                merge_role_stats_from_packet(hex_str)
+            with session._lock:
+                session.role_stats_full_refresh_on_next_ed07 = False
+        else:
+            merge_role_stats_from_packet(hex_str)
         return
     if "e207" in fingerprint:
         handle_battle_server_packet(hex_str)
@@ -517,6 +526,7 @@ def select_role_flow(role_id: str) -> dict:
         ensure_control_worker_running()
         with session._lock:
             session.role_stats = {}
+            session.role_stats_full_refresh_on_next_ed07 = False
         select_hex = build_select_role_packet(role_id)
         from services.action_manager import send_and_wait, send_raw_action
 

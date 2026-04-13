@@ -710,6 +710,7 @@ def mark_battle_started(monster_code: str):
     session = get_session()
     wait_deadline = time.time() + DE07_TIMEOUT_S
     with session._lock:
+        session.role_stats_full_refresh_on_next_ed07 = False
         session.battle_f703_timeout_recover_count = 0
         next_round = session.battle_round_seq + 1
         if not session.battle_current_monster:
@@ -930,6 +931,13 @@ def parse_battle_response(packet_hex: str) -> Dict[str, Any]:
     return payload
 
 
+def _mark_role_stats_full_refresh_on_next_ed07() -> None:
+    """战斗正式结束后，下一条含 ed07 的下行将整表替换 role_stats（由 flow_manager 分发）。"""
+    s = get_session()
+    with s._lock:
+        s.role_stats_full_refresh_on_next_ed07 = True
+
+
 def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
     """解析 df07：三类——进行中（继续 f703）、内力不足（停战）、战斗已结束（仅提示，胜负看 e207）。"""
     session = get_session()
@@ -942,6 +950,7 @@ def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
 
     stats_updated = update_session_stats(packet_hex)
     if no_energy:
+        _mark_role_stats_full_refresh_on_next_ed07()
         df07_kind = "inner_force_short"
         is_end_confirmed = True
         should_continue = False
@@ -1067,6 +1076,7 @@ def handle_battle_settlement_e207(packet_hex: str) -> Dict[str, Any]:
             "end_reason": "e207_parse_error",
         }
 
+    _mark_role_stats_full_refresh_on_next_ed07()
     update_session_stats(packet_hex)
     now = time.time()
     with session._lock:
