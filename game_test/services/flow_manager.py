@@ -3,11 +3,12 @@
 负责登录、拉角色、选角、断开连接，以及统一下行分发。
 """
 
+import socket
 import threading
 import time
 from typing import Callable, Dict
 
-from config import GAME_SERVERS, LOGIN_SERVERS
+from config import GAME_SERVERS, LOGIN_SERVERS, RECV_BUFSIZE
 from core.codec import split_game_frame_bytes
 from core.connector import connect_and_exchange, open_connection, start_connection_runtime, stop_connection_runtime
 from core.session import RoleInfo, get_session
@@ -30,6 +31,7 @@ from features.battle import (
 )
 from features.heartbeat import start_heartbeat
 from features.login import build_login_packet, parse_login_response
+from features.packet_probe import record_packet
 from features.role_stats import merge_role_stats_from_packet, update_session_stats
 from features.roles import (
     build_enter_game_extra_packet,
@@ -528,6 +530,59 @@ def fetch_roles_flow(server_ip: str = "", server_port: int = 0, server_name: str
         return {"ok": False, "error": f"获取角色列表失败: {e}"}
 
 
+def _sync_drain_recv_until_role_stats(*, max_wait_s: float = 15.0) -> dict:
+    """
+    选角后服务器常先发 ed07 等短包，再在后续 TCP 里下发含 LV 属性链的 d607 等。
+    send_and_receive_once 只 recv 一次，若首包无属性会误判失败；在收包线程启动前同步补读。
+    """
+    session = get_session()
+    sock = session.sock
+    if not sock:
+        return {"ok": False, "error": "socket 已断开"}
+
+    deadline = time.monotonic() + max(0.5, max_wait_s)
+    old_timeout = sock.gettimeout()
+    try:
+        while time.monotonic() < deadline:
+            with session._lock:
+                if session.role_stats:
+                    return {"ok": True}
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            sock.settimeout(min(1.0, max(0.05, remain)))
+            try:
+                chunk = sock.recv(RECV_BUFSIZE)
+            except socket.timeout:
+                continue
+            if not chunk:
+                return {"ok": False, "error": "选角后连接关闭，未等到角色属性"}
+            combined = session.recv_framing_buffer + chunk
+            frames, rest = split_game_frame_bytes(combined)
+            session.recv_framing_buffer = rest
+            for frame in frames:
+                record_packet(frame, "DN")
+                handle_incoming_packet(frame, already_framed=True)
+                try:
+                    frag = frame.decode("utf-8", errors="ignore")
+                except Exception:
+                    frag = ""
+                if "登录异常" in frag or "请重新登录" in frag:
+                    return {"ok": False, "error": "登录异常，请重新登录"}
+            with session._lock:
+                if session.role_stats:
+                    return {"ok": True}
+        with session._lock:
+            if session.role_stats:
+                return {"ok": True}
+        return {"ok": False, "error": "等待角色属性超时"}
+    finally:
+        try:
+            sock.settimeout(old_timeout)
+        except Exception:
+            pass
+
+
 def select_role_flow(role_id: str) -> dict:
     """选角并进入游戏。"""
     session = get_session()
@@ -542,7 +597,7 @@ def select_role_flow(role_id: str) -> dict:
         select_hex = build_select_role_packet(role_id)
         from services.action_manager import send_and_wait, send_raw_action
 
-        select_res = send_and_wait(select_hex, timeout=5)
+        select_res = send_and_wait(select_hex, timeout=12)
         if not select_res.get("ok"):
             return {"ok": False, "error": f"选角失败: {select_res.get('error')}"}
 
@@ -554,6 +609,16 @@ def select_role_flow(role_id: str) -> dict:
         handle_incoming_packet(select_res["response_bytes"])
         with session._lock:
             role_stats_ready = bool(session.role_stats)
+        if not role_stats_ready:
+            drain = _sync_drain_recv_until_role_stats(max_wait_s=15.0)
+            if not drain.get("ok"):
+                stop_connection_runtime()
+                return {
+                    "ok": False,
+                    "error": drain.get("error") or "选角成功但未收到角色属性，重连判定失败",
+                }
+            with session._lock:
+                role_stats_ready = bool(session.role_stats)
         if not role_stats_ready:
             stop_connection_runtime()
             return {"ok": False, "error": "选角成功但未收到角色属性，重连判定失败"}

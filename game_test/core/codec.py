@@ -6,7 +6,7 @@
 import binascii
 import re
 import struct
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # 与 services.action_manager._validate_packet_hex 一致：首 4 字节 LE 为 L，整包长度 = L + 4
 _MAX_GAME_FRAME_BYTES = 512 * 1024
@@ -114,6 +114,35 @@ def split_game_frame_bytes(
         frames.append(data[i : i + total])
         i += total
     return frames, b""
+
+
+def slice_game_frame_hex_at(
+    packet_hex: str,
+    frame_start_hex_offset: int,
+    *,
+    max_frame_bytes: int = _MAX_GAME_FRAME_BYTES,
+) -> Optional[str]:
+    """
+    从 hex 串的字符偏移 frame_start_hex_offset 起截取一条完整游戏帧（不含其后拼接的其它帧）。
+
+    规则与 split_game_frame_bytes / _validate_packet_hex 一致：前 4 字节 LE 为 L，
+    本条总字节数 = L + 4。长度非法或越界时返回 None。
+    """
+    h = len(packet_hex)
+    if frame_start_hex_offset < 0 or frame_start_hex_offset + 8 > h:
+        return None
+    head_slice = packet_hex[frame_start_hex_offset : frame_start_hex_offset + 8]
+    try:
+        length_field = int.from_bytes(bytes.fromhex(head_slice), "little")
+    except (ValueError, TypeError):
+        return None
+    total_bytes = length_field + 4
+    if total_bytes < 4 or total_bytes > max_frame_bytes:
+        return None
+    end_hex = frame_start_hex_offset + total_bytes * 2
+    if end_hex > h:
+        return None
+    return packet_hex[frame_start_hex_offset:end_hex]
 
 
 def parse_frame(hex_data: str) -> Dict[str, Any]:

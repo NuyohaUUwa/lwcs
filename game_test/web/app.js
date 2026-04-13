@@ -109,6 +109,9 @@ let _heartbeatPollTimer = null;
 const STALE_WARN_S = 60;   // 距上次收包 > 60s 开始显示警告
 const RECONNECT_ROLE_STATS_TIMEOUT_MS = 5000;
 const RECONNECT_ROLE_STATS_POLL_MS = 250;
+/** 一键登录：整链失败（含选角后久无 d607/属性）时自动重试次数 */
+const QUICK_LOGIN_MAX_ATTEMPTS = 3;
+const QUICK_LOGIN_RETRY_GAP_MS = 800;
 
 function setControlState(data) {
   controlState = { ...controlState, ...(data || {}) };
@@ -290,6 +293,7 @@ async function runUnifiedQuickLogin(info, opts = {}) {
   const reason = String(opts.reason || '一键登录');
   const updateUi = opts.updateUi !== false;
   const requireRoleStats = opts.requireRoleStats !== false;
+  const maxAttempts = Math.max(1, Math.min(10, Number(opts.maxAttempts) || QUICK_LOGIN_MAX_ATTEMPTS));
   const now = Date.now();
   if (unifiedLoginLockPromise) {
     return { ok: false, error: `${reason}触发过于频繁，请稍后再试`, throttled: true };
@@ -303,18 +307,33 @@ async function runUnifiedQuickLogin(info, opts = {}) {
     if (!info.account || !info.password || !info.loginServer || !info.serverIp || !info.serverPort || !info.roleId) {
       return { ok: false, error: '缺少一键登录所需的完整上下文' };
     }
-    if (updateUi) {
-      document.getElementById('status-text').textContent = `${reason}中…`;
-    }
-    const flow = await performLoginFlow(info);
-    if (flow.ok && requireRoleStats) {
-      const statsReady = await waitForRoleStatsReady();
-      if (!statsReady.ok) {
+    const statusEl = () => document.getElementById('status-text');
+    let lastError = '未知错误';
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (attempt > 1) {
         await api('POST', '/api/disconnect', {}).catch(() => null);
-        return statsReady;
+        await new Promise((r) => setTimeout(r, QUICK_LOGIN_RETRY_GAP_MS));
+        if (updateUi) {
+          const el = statusEl();
+          if (el) el.textContent = `${reason}中（第 ${attempt}/${maxAttempts} 次）…`;
+        }
+      } else if (updateUi) {
+        const el = statusEl();
+        if (el) el.textContent = `${reason}中…`;
       }
-    }
-    if (flow.ok) {
+      const flow = await performLoginFlow(info);
+      if (!flow.ok) {
+        lastError = flow.error || lastError;
+        continue;
+      }
+      if (requireRoleStats) {
+        const statsReady = await waitForRoleStatsReady();
+        if (!statsReady.ok) {
+          lastError = statsReady.error || lastError;
+          await api('POST', '/api/disconnect', {}).catch(() => null);
+          continue;
+        }
+      }
       lastConnectInfo = {
         account: info.account || '',
         password: info.password || '',
@@ -325,8 +344,18 @@ async function runUnifiedQuickLogin(info, opts = {}) {
         roleId: info.roleId || '',
       };
       localStorage.setItem('lastConnectInfo', JSON.stringify(lastConnectInfo));
+      return { ok: true, role: flow.role || null };
     }
-    return flow;
+    await api('POST', '/api/disconnect', {}).catch(() => null);
+    const ri = document.getElementById('reconnect-info');
+    if (ri) ri.textContent = '';
+    resetToLoginState();
+    const st = await api('GET', '/api/status').catch(() => null);
+    if (st) updateStatus(st);
+    return {
+      ok: false,
+      error: maxAttempts > 1 ? `${lastError}（已重试 ${maxAttempts} 次）` : lastError,
+    };
   })();
 
   unifiedLoginLockPromise = runner;

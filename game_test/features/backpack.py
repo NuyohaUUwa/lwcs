@@ -7,7 +7,7 @@
 
 import binascii
 
-from core.codec import find_all_positions
+from core.codec import find_all_positions, slice_game_frame_hex_at
 from core.session import get_session, Item
 from features.role_stats import merge_role_stats_from_packet
 
@@ -139,7 +139,11 @@ def _parse_embedded_obtained_packets(packet_hex: str) -> bool:
         idx = packet_hex_l.find(marker, start)
         if idx < 8:
             break
-        sub_packet = packet_hex[idx - 8 :]
+        frame_start = idx - 8
+        sub_packet = slice_game_frame_hex_at(packet_hex, frame_start)
+        if sub_packet is None:
+            start = idx + len(marker)
+            continue
         if session.apply_optimistic_obtain_items(_items_for_obtain_and_bought(sub_packet)):
             changed = True
         merge_role_stats_from_packet(sub_packet)

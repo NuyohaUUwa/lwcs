@@ -90,6 +90,7 @@ _PACKET_LOG_SKIP_FINGERPRINTS: frozenset[str] = frozenset(
         "e8030100514f",  # 服务器心跳（下行）
         "e8030a000a04",  # 客户端心跳模板 e8030a000a04（上行；偶见与业务同批下行）
         "e80302000504",  # 另一路客户端心跳（fingerprints.json）
+        "e8030100f207",  # 世界频道/系统公告
     }
 )
 

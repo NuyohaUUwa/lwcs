@@ -82,6 +82,8 @@ def parse_role_data(res_hex: str) -> Dict[str, Any]:
 
 
 def parse_select_role_response(response_bytes: bytes) -> Dict[str, Any]:
+    if not response_bytes:
+        return {"ok": False, "text": "", "raw_hex": ""}
     text = response_bytes.decode("utf-8", errors="ignore")
     normalized = text.strip()
     return {
