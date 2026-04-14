@@ -82,6 +82,9 @@ class GameSession:
         self.role_stats: Dict[str, str] = {}
         # 战斗正式结束后，下一条含 ed07 指纹的下行包优先按「全量属性」解析并整表替换 role_stats（见 flow_manager）
         self.role_stats_full_refresh_on_next_ed07: bool = False
+        # 地图 NPC 列表下行（e803…4d4f/db07）解析结果，供购买等报文拼接 npc_id
+        self.current_map_npc_id_hex: str = ""
+        self.current_map_npc_utf8_text: str = ""
 
         # ---- 心跳检测 ----
         self.last_recv_ts: float = 0.0
@@ -142,6 +145,19 @@ class GameSession:
     def update_item(self, item: Item):
         with self._lock:
             self.backpack_items[item.item_id] = item
+
+    def set_current_map_npc(self, id_hex: str, utf8_text: str = "") -> None:
+        """写入当前地图 NPC（4 字节 id 的 8 位 hex）；非法长度则忽略。"""
+        h = str(id_hex or "").strip().lower()
+        if len(h) != 8:
+            return
+        try:
+            int(h, 16)
+        except ValueError:
+            return
+        with self._lock:
+            self.current_map_npc_id_hex = h
+            self.current_map_npc_utf8_text = str(utf8_text or "").strip()
 
     def replace_backpack_items(self, items: Dict[str, Item]) -> None:
         """以权威快照整体替换背包（如 d607 全量列表）。"""
@@ -321,6 +337,10 @@ class GameSession:
         self.heartbeat_thread = None
         self.recv_framing_buffer = b""
 
+    def discard_send_queue(self):
+        """丢弃待发报文队列。断线后须清空，否则重连的发包线程会继续发出旧连接上入队的 f703 等。"""
+        self.send_queue = queue.PriorityQueue()
+
     # ------------------------------------------------------------------ #
     #  状态查询                                                            #
     # ------------------------------------------------------------------ #
@@ -328,6 +348,14 @@ class GameSession:
         import time
 
         last_recv_age = round(time.time() - self.last_recv_ts, 1) if self.last_recv_ts > 0 else None
+        with self._lock:
+            _npc_id = self.current_map_npc_id_hex
+            _npc_name = self.current_map_npc_utf8_text
+        current_map_npc = (
+            {"id_hex": _npc_id, "utf8_text": _npc_name}
+            if _npc_id and len(_npc_id) == 8
+            else None
+        )
         return {
             "connected": self.connected,
             "connection_status": self.connection_status,
@@ -337,6 +365,7 @@ class GameSession:
             "backpack_count": len(self.backpack_items),
             "last_recv_age": last_recv_age,
             "default_battle_loop_delay_ms": DEFAULT_BATTLE_LOOP_DELAY_MS,
+            "current_map_npc": current_map_npc,
             "control_state": self.get_control_state(),
             "battle_state": {
                 "state": self.battle_state,
@@ -382,6 +411,8 @@ class GameSession:
             self.backpack_items = {}
             self.role_stats = {}
             self.role_stats_full_refresh_on_next_ed07 = False
+            self.current_map_npc_id_hex = ""
+            self.current_map_npc_utf8_text = ""
             self.last_recv_ts = 0.0
             self.recv_framing_buffer = b""
             self.battle_state = "idle"
@@ -412,6 +443,7 @@ class GameSession:
             self.reconnect_next_retry_ts = 0.0
             self.reconnect_banned_until_ts = 0.0
             self.clear_connection_runtime()
+        self.discard_send_queue()
         self.notify_status_change()
         self.notify_battle_state()
         self.notify_control_state()

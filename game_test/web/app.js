@@ -21,6 +21,9 @@ let starStoneLoopCount = 0;
 let starStoneTotalStone = 0;
 let starStoneTotalFragment = 0;
 let starStoneTimer = null;
+let transportSupplyRunning = false;
+let transportSupplyStopRequested = false;
+let transportSupplyWaiter = null;
 let battleMonsters = [];
 let selectedMonsterCode = '';
 let battleLogMode = 'simple'; // simple | detail
@@ -30,6 +33,19 @@ let controlState = { auto_reconnect_enabled: false, reconnect_state: 'idle', rec
 let serverDefaultBattleLoopDelayMs = null;
 let battleState = { state: 'idle', in_progress: false, mode: 'idle', loop_running: false, current_monster: '', loop_monster_code: '', loop_delay_ms: 0, total_count: 0, total_exp: 0, total_gold_copper: 0 };
 let lastStatusData = { connected: false, connection_status: 'disconnected', role: null, server_name: '' };
+let teleportDestinationsCache = [];
+const TELEPORT_PACKET_TEMPLATE = '18000000e80303004428{random_num}f5054728000006000000{destination}0000';
+const DAILY_CHECKIN_TEMPLATE = '20000000e80313007d2e08f4f505882e00000e0000000c00636865636b496e446f3f7b7d';
+/** 运输物资报文中的 NPC id 占位（8 hex），运行时替换为当前地图 NPC id */
+const TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER = '74010000';
+const TRANSPORT_SUPPLY_BUY_TEMPLATE = `27000000e8030d00fe031d3ff5051004000015000000${TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER}022c9d0900000000000000000001000000`;
+const TRANSPORT_SUPPLY_DELIVER_TEMPLATE = `27000000e8030d00fe03cea8f5051004000015000000${TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER}02319d0900000000000000000000000000`;
+/** 下行完成指纹：用户描述为 e8030100e60，实际多为 e607 等，按前缀匹配 */
+const TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX = 'e8030100e60';
+const TRANSPORT_SUPPLY_MAX_ROUNDS = 10;
+const TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS = 180000;
+/** 当前地图 NPC：由后端 Python 解析后随 SSE packet.map_npc 下发 */
+let currentMapNpcFromPacket = { idHex: '', utf8Text: '' };
 
 // ================================================================== //
 //  工具函数                                                            //
@@ -57,7 +73,7 @@ function clearMsg(elId) {
 
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
-    const names = ['probe', 'backpack', 'chat', 'battle'];
+    const names = ['probe', 'backpack', 'chat', 'battle', 'tools'];
     b.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab-content').forEach(el => {
@@ -84,6 +100,8 @@ function startSSE() {
         appendPacketRow(msg.data);
         appendBattlePacketLine(msg.data);
         handleStarStonePacket(msg.data);
+        handleTransportSupplyPacket(msg.data);
+        handleMapNpcListDnPacket(msg.data);
       }
       else if (msg.type === 'annotation') updatePacketAnnotation(msg.data);
       else if (msg.type === 'role_stats') renderRoleStats(msg.data);
@@ -714,7 +732,7 @@ function selectBuyItem(code) {
 async function buyItem() {
   const input = document.getElementById('backpack-buy-code');
   const itemCode = input.value.trim().toLowerCase();
-  if (!itemCode) { showMsg('backpack-msg', '请输入 22 位物品编码', 'err'); return; }
+  if (!itemCode) { showMsg('backpack-msg', '请输入 14 位物品编码', 'err'); return; }
   const res = await api('POST', '/api/item/buy', { item_code: itemCode });
   showMsg('backpack-msg', res.ok ? withValidationWarning('购买请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
 }
@@ -722,7 +740,7 @@ async function buyItem() {
 async function saveBuyItem() {
   const name = document.getElementById('backpack-buy-name').value.trim();
   const code = document.getElementById('backpack-buy-code').value.trim().toLowerCase();
-  if (!name || !code) { showMsg('backpack-msg', '请填写物品名称和 22 位编码', 'err'); return; }
+  if (!name || !code) { showMsg('backpack-msg', '请填写物品名称和 14 位编码', 'err'); return; }
   const res = await api('POST', '/api/buy-items', { name, code });
   if (res.ok) {
     buyItemFavorites = Array.isArray(res.items) ? res.items : [];
@@ -795,6 +813,31 @@ function bytesFromHex(rawHex) {
   return {
     decodeText: new TextDecoder('utf-8', { fatal: false }).decode(arr).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim(),
   };
+}
+
+function updateMapNpcFromPacketUi() {
+  const el = document.getElementById('battle-map-npc-from-packet');
+  if (!el) return;
+  const { idHex, utf8Text } = currentMapNpcFromPacket;
+  if (!idHex) {
+    el.textContent = '—';
+    return;
+  }
+  const name = utf8Text ? `${utf8Text} · ` : '';
+  el.textContent = `${name}${idHex}`;
+}
+
+function handleMapNpcListDnPacket(record) {
+  const m = record?.map_npc;
+  if (!m || !m.id_hex) return;
+  currentMapNpcFromPacket = { idHex: String(m.id_hex), utf8Text: String(m.utf8_text || '') };
+  updateMapNpcFromPacketUi();
+}
+
+function getTransportSupplyNpcIdHexForPacket() {
+  const h = String(currentMapNpcFromPacket.idHex || '').trim().toLowerCase();
+  if (h.length !== 8 || !/^[0-9a-f]{8}$/.test(h)) return '';
+  return h;
 }
 
 function parseStarStoneRewards(record) {
@@ -1118,7 +1161,8 @@ function onBattleSettlementE207(data) {
     : Number((raw.match(/(?:获得)?经验[：:+\s]*([0-9]+)/)?.[1] || 0));
   if (data?.outcome === 'victory' || raw.includes('获得')) {
     const n = Number(data?.battle_state?.total_count || battleState.total_count || 0);
-    appendBattleLog({ raw_text: `第${n}次 战斗结束` }, 'end');
+    const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    appendBattleLog({ raw_text: `【${t}】 第${n}次 战斗结束` }, 'end');
   }
   appendBattleLog({
     raw_text: `结算：本次获得经验 ${resultExp} / 金币 ${resultGold}`,
@@ -1600,6 +1644,309 @@ function randomNumHex6() {
   return (0x100000 + Math.floor(Math.random() * (0x1000000 - 0x100000))).toString(16).padStart(6, '0');
 }
 
+function setToolResult(text, type = 'info') {
+  showMsg('tool-send-result', text, type);
+}
+
+function toLittleEndianHex16(value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 0xffff) {
+    throw new Error('加点数量必须是 0~65535 的整数');
+  }
+  const hex = n.toString(16).padStart(4, '0');
+  return hex.slice(2, 4) + hex.slice(0, 2);
+}
+
+function appendTransportSupplyLog(text, kind = 'info') {
+  const box = document.getElementById('tool-transport-supply-log');
+  if (!box) return;
+  if (box.querySelector('.text-muted.text-sm') && box.children.length === 1) {
+    box.innerHTML = '';
+  }
+  const line = document.createElement('div');
+  line.className = kind === 'err' ? 'text-red' : kind === 'ok' ? 'text-green' : 'text-muted';
+  line.textContent = text;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function updateTransportSupplyButton() {
+  const btn = document.getElementById('btn-transport-supply');
+  if (!btn) return;
+  btn.textContent = transportSupplyRunning ? '停止运输物资' : '开始运输物资';
+  btn.className = transportSupplyRunning ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+}
+
+function formatTransportSupplyPacketHint(record) {
+  const fp = String(record?.fingerprint || '').toLowerCase();
+  const raw = String(record?.raw_hex || '');
+  const fromDecode = decodePacketText(raw);
+  const parsedTxt = record?.parsed?.utf8_text ? String(record.parsed.utf8_text) : '';
+  const txt = (fromDecode || parsedTxt || '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim().slice(0, 160);
+  return txt ? `fp=${fp} · ${txt}` : `fp=${fp}`;
+}
+
+function isTransportSupplyPurchaseLimit(record) {
+  if (!record || record.direction !== 'DN') return false;
+  const raw = String(record.raw_hex || '');
+  const t = `${decodePacketText(raw)} ${record?.parsed?.utf8_text || ''}`.toLowerCase();
+  return /购买.*上限|已达.*上限|次数.*上限|今日.*上限|无法.*购买|不能再买|购买次数/.test(t);
+}
+
+function isTransportSupplyCompletionPacket(record) {
+  if (!record || record.direction !== 'DN') return false;
+  const fp = String(record.fingerprint || '').toLowerCase();
+  return fp.includes(TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX);
+}
+
+function clearTransportSupplyWaiter(result) {
+  const w = transportSupplyWaiter;
+  if (!w) return;
+  clearTimeout(w.timer);
+  transportSupplyWaiter = null;
+  w.resolve(result);
+}
+
+function satisfyTransportSupplyWaiter(record) {
+  const w = transportSupplyWaiter;
+  if (!w || w.settled) return;
+  if (!w.predicate(record)) return;
+  w.settled = true;
+  clearTimeout(w.timer);
+  transportSupplyWaiter = null;
+  w.resolve(record);
+}
+
+function waitForTransportSupplyPacket(predicate, timeoutMs) {
+  return new Promise((resolve) => {
+    const state = {
+      predicate,
+      resolve,
+      settled: false,
+      timer: setTimeout(() => {
+        if (transportSupplyWaiter !== state) return;
+        transportSupplyWaiter = null;
+        resolve(null);
+      }, timeoutMs),
+    };
+    transportSupplyWaiter = state;
+  });
+}
+
+function handleTransportSupplyPacket(record) {
+  if (!transportSupplyRunning || !record) return;
+  if (record.direction !== 'DN') return;
+  if (isTransportSupplyPurchaseLimit(record)) {
+    transportSupplyStopRequested = true;
+    appendTransportSupplyLog(`检测到购买达到上限，自动停止。${formatTransportSupplyPacketHint(record)}`, 'err');
+    setToolResult('运输物资：服务器提示购买已达上限，已停止', 'err');
+    clearTransportSupplyWaiter(null);
+    return;
+  }
+  satisfyTransportSupplyWaiter(record);
+}
+
+async function sleepInterruptible(ms, isStopped) {
+  const step = 500;
+  let left = Math.max(0, ms);
+  while (left > 0) {
+    if (isStopped()) return false;
+    const chunk = Math.min(step, left);
+    await new Promise((r) => setTimeout(r, chunk));
+    left -= chunk;
+  }
+  return !isStopped();
+}
+
+async function sendProbeHexQuiet(hex) {
+  const cleanHex = String(hex || '').replace(/\s+/g, '').toLowerCase();
+  if (!cleanHex || cleanHex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(cleanHex)) {
+    return { ok: false, error: '报文 hex 无效' };
+  }
+  return api('POST', '/api/probe/send', { hex: cleanHex, use_queue: true });
+}
+
+function toggleTransportSupplyFlow() {
+  if (transportSupplyRunning) {
+    transportSupplyStopRequested = true;
+    appendTransportSupplyLog('已请求停止…', 'info');
+    return;
+  }
+  runTransportSupplyFlow();
+}
+
+async function runTransportSupplyFlow() {
+  if (transportSupplyRunning) return;
+  transportSupplyRunning = true;
+  transportSupplyStopRequested = false;
+  updateTransportSupplyButton();
+  const log = document.getElementById('tool-transport-supply-log');
+  if (log) log.innerHTML = '';
+  appendTransportSupplyLog('运输物资流程已启动（最多 10 轮）', 'ok');
+
+  const isStopped = () => transportSupplyStopRequested;
+
+  try {
+    for (let round = 1; round <= TRANSPORT_SUPPLY_MAX_ROUNDS; round++) {
+      if (isStopped()) break;
+
+      const npcId = getTransportSupplyNpcIdHexForPacket();
+      if (!npcId) {
+        appendTransportSupplyLog('缺少当前地图 NPC id（需先收到地图 NPC 列表下行包），已中止', 'err');
+        setToolResult('运输物资：请先在游戏内触发地图 NPC 列表，待界面显示当前 NPC 后再开始', 'err');
+        break;
+      }
+
+      const buyHex = TRANSPORT_SUPPLY_BUY_TEMPLATE
+        .replace(TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER, npcId)
+        .replace('1d3f', randomNumHex4());
+      appendTransportSupplyLog(`第 ${round} 轮：发送购买物资（NPC ${npcId}）…`, 'info');
+      const buyRes = await sendProbeHexQuiet(buyHex);
+      if (!buyRes.ok) {
+        appendTransportSupplyLog(`购买发送失败：${buyRes.error || '未知错误'}`, 'err');
+        setToolResult(`运输物资：购买失败 — ${buyRes.error || '未知错误'}`, 'err');
+        break;
+      }
+      await sleepInterruptible(800, isStopped);
+      if (isStopped()) break;
+
+      appendTransportSupplyLog('等待 60 秒后交付物资…', 'info');
+      const waited = await sleepInterruptible(60000, isStopped);
+      if (!waited || isStopped()) {
+        appendTransportSupplyLog('已停止（等待交付阶段中断）', 'info');
+        break;
+      }
+
+      const deliverHex = TRANSPORT_SUPPLY_DELIVER_TEMPLATE
+        .replace(TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER, npcId)
+        .replace('cea8', randomNumHex4());
+      appendTransportSupplyLog(`发送交付物资（NPC ${npcId}）…`, 'info');
+      const waitPromise = waitForTransportSupplyPacket(
+        (rec) => isTransportSupplyCompletionPacket(rec),
+        TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS
+      );
+      const delRes = await sendProbeHexQuiet(deliverHex);
+      if (!delRes.ok) {
+        clearTransportSupplyWaiter(null);
+        appendTransportSupplyLog(`交付发送失败：${delRes.error || '未知错误'}`, 'err');
+        setToolResult(`运输物资：交付失败 — ${delRes.error || '未知错误'}`, 'err');
+        break;
+      }
+
+      const doneRec = await waitPromise;
+      if (isStopped()) {
+        appendTransportSupplyLog('已停止', 'info');
+        break;
+      }
+      if (!doneRec) {
+        appendTransportSupplyLog(
+          `第 ${round} 轮：等待完成响应超时（${TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS / 1000}s 内未收到含 ${TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX} 的下行指纹）`,
+          'err'
+        );
+        setToolResult('运输物资：等待完成响应超时', 'err');
+        break;
+      }
+
+      const summary = formatTransportSupplyPacketHint(doneRec);
+      appendTransportSupplyLog(`第 ${round} 轮：完成。${summary}`, 'ok');
+      setToolResult(`运输物资 第 ${round} 轮完成：${summary}`, 'ok');
+    }
+
+    if (!transportSupplyStopRequested) {
+      appendTransportSupplyLog('流程结束（已达最大轮数或未触发提前停止）', 'info');
+    }
+  } finally {
+    transportSupplyRunning = false;
+    transportSupplyStopRequested = false;
+    if (transportSupplyWaiter) clearTransportSupplyWaiter(null);
+    updateTransportSupplyButton();
+  }
+}
+
+async function loadToolTeleportOptions() {
+  const select = document.getElementById('tool-teleport-destination');
+  if (!select) return;
+  const res = await api('GET', '/api/teleport/destinations').catch(() => null);
+  const items = Array.isArray(res?.items) ? res.items : [];
+  teleportDestinationsCache = items
+    .map((item) => ({
+      name: String(item?.name || '').trim(),
+      code: String(item?.code || '').trim().toLowerCase(),
+    }))
+    .filter((item) => item.name && /^[0-9a-f]{8}$/.test(item.code));
+  if (!teleportDestinationsCache.length) {
+    select.innerHTML = '<option value="">暂无可用地点</option>';
+    select.value = '';
+    return;
+  }
+  select.innerHTML = teleportDestinationsCache
+    .map((item) => `<option value="${escAttr(item.code)}">${escHtml(item.name)} (${escHtml(item.code)})</option>`)
+    .join('');
+  select.value = teleportDestinationsCache[0].code;
+}
+
+async function sendToolPacket(hex) {
+  const cleanHex = String(hex || '').replace(/\s+/g, '').toLowerCase();
+  if (!cleanHex) {
+    setToolResult('报文不能为空', 'err');
+    return;
+  }
+  if (cleanHex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(cleanHex)) {
+    setToolResult('报文必须是偶数字节长度的 hex 字符串', 'err');
+    return;
+  }
+  const res = await api('POST', '/api/probe/send', { hex: cleanHex, use_queue: true });
+  if (!res.ok) {
+    setToolResult(res.error || '发送失败', 'err');
+    return;
+  }
+  const sentText = withValidationWarning(
+    `发送成功 · 方式: ${res.method}${res.sent_bytes !== undefined ? ` · ${res.sent_bytes} bytes` : ''}`,
+    res
+  );
+  setToolResult(`${sentText} · hex: ${cleanHex}`, 'ok');
+}
+
+async function sendTeleportPacket() {
+  const select = document.getElementById('tool-teleport-destination');
+  const destination = String(select?.value || '').trim().toLowerCase();
+  if (!destination || destination.length !== 8 || !/^[0-9a-f]{8}$/.test(destination)) {
+    setToolResult('请选择有效的传送地点', 'err');
+    return;
+  }
+  const packetHex = TELEPORT_PACKET_TEMPLATE
+    .replace('{random_num}', randomNumHex4())
+    .replace('{destination}', destination);
+  await sendToolPacket(packetHex);
+}
+
+async function sendDailyCheckinPacket() {
+  const packetHex = DAILY_CHECKIN_TEMPLATE.replace('08f4', randomNumHex4());
+  await sendToolPacket(packetHex);
+}
+
+async function sendRoleStatPacket() {
+  const attrCode = String(document.getElementById('tool-role-attr')?.value || '').trim().toLowerCase();
+  if (!/^(00|01|02|03)$/.test(attrCode)) {
+    setToolResult('请选择有效属性：00/01/02/03', 'err');
+    return;
+  }
+  const pointsRaw = String(document.getElementById('tool-role-points')?.value || '').trim();
+  if (!/^\d+$/.test(pointsRaw)) {
+    setToolResult('加点数量必须是十进制整数', 'err');
+    return;
+  }
+  let amountLE;
+  try {
+    amountLE = toLittleEndianHex16(pointsRaw);
+  } catch (err) {
+    setToolResult(err?.message || '加点数量不合法', 'err');
+    return;
+  }
+  const packetHex = `1a000000e8030200fd03${randomNumHex4()}f505020400000800000001${attrCode}${amountLE}00000000`;
+  await sendToolPacket(packetHex);
+}
+
 function applyCustomPacketRandomNum(hexStr) {
   const cleanHex = String(hexStr || '').replace(/\s+/g, '').toLowerCase();
   const mode = document.getElementById('custom-random-mode')?.value || 'hex4';
@@ -1776,5 +2123,6 @@ function toggleCollapseMode() {
   loadAutoUseRules();
   loadQuickLogins();
   loadBuyItems();
+  await loadToolTeleportOptions();
   updateBattleStatsText();
 })();

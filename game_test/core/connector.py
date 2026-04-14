@@ -15,6 +15,9 @@ from core.codec import split_game_frame_bytes
 from core.session import get_session
 from features.packet_probe import record_packet
 
+_F703_PACKET_MARK = "e8030500f703"
+_BATTLE_WAITING_STATES = {"waiting_start_response", "waiting_action_result"}
+
 
 def _get_connected_socket() -> socket.socket:
     session = get_session()
@@ -182,6 +185,8 @@ def stop_connection_runtime():
     if stop_event:
         stop_event.set()
     close_connection()
+    # 旧发包线程已停止，但队列仍可能留有断线前的 f703/f603 等；不重置则重连后会批量发出
+    session.discard_send_queue()
     session.clear_connection_runtime()
 
 
@@ -246,6 +251,17 @@ def start_send_worker(
     if stop_event is None:
         stop_event = threading.Event()
 
+    def _should_drop_queued_packet(hex_str: str) -> bool:
+        packet_hex = str(hex_str or "").lower()
+        if _F703_PACKET_MARK not in packet_hex:
+            return False
+        session = get_session()
+        with session._lock:
+            battle_state = str(session.battle_state or "")
+        if battle_state in _BATTLE_WAITING_STATES:
+            return False
+        return True
+
     def _worker():
         while not stop_event.is_set():
             try:
@@ -254,8 +270,12 @@ def start_send_worker(
                 continue
 
             try:
+                if _should_drop_queued_packet(hex_str):
+                    continue
                 data = binascii.unhexlify(hex_str)
                 with send_lock:
+                    if _should_drop_queued_packet(hex_str):
+                        continue
                     sock = _get_connected_socket()
                     sent_bytes = _send_all(sock, data)
                 if sent_bytes > 0:

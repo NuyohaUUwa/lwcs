@@ -133,7 +133,7 @@ def load_buy_items():
             continue
         name = str(item.get("name", "")).strip()
         code = str(item.get("code", "")).strip().lower()
-        if not name or len(code) != 22:
+        if not name or len(code) != 14:
             continue
         try:
             int(code, 16)
@@ -152,8 +152,8 @@ def upsert_buy_item(body: dict):
     code = (body.get("code") or "").strip().lower()
     if not name:
         return {"ok": False, "error": "name 不能为空"}
-    if len(code) != 22:
-        return {"ok": False, "error": "code 必须是 22 位 hex"}
+    if len(code) != 14:
+        return {"ok": False, "error": "code 必须是 14 位 hex"}
     try:
         int(code, 16)
     except ValueError:

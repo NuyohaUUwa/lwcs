@@ -156,6 +156,10 @@
     border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
     padding: 8px; min-height: 80px; max-height: 180px; overflow-y: auto; font-size: 12px;
   }
+  #tool-transport-supply-log {
+    border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+    padding: 8px; min-height: 80px; max-height: 220px; overflow-y: auto; font-size: 12px;
+  }
 
   /* ---- 聊天 ---- */
   #chat-log {
@@ -438,6 +442,7 @@
       <button class="tab-btn" onclick="switchTab('backpack')">🎒 背包</button>
       <button class="tab-btn" onclick="switchTab('chat')">💬 聊天</button>
       <button class="tab-btn" onclick="switchTab('battle')">⚔ 战斗</button>
+      <button class="tab-btn" onclick="switchTab('tools')">🛠 功能</button>
     </div>
 
     <!-- 背包 Tab -->
@@ -465,7 +470,7 @@
           </div>
           <div id="backpack-buy-row" class="battle-row mt-8">
             <input type="text" id="backpack-buy-name" placeholder="物品名称">
-            <input type="text" id="backpack-buy-code" placeholder="输入 22 位物品编码，如：00112233445566778899aa">
+            <input type="text" id="backpack-buy-code" placeholder="输入 14 位物品编码（hex），如：032d0400004012">
             <button class="btn btn-primary btn-sm" onclick="buyItem()">购买物品</button>
             <button class="btn btn-ghost btn-sm" onclick="saveBuyItem()">保存常用</button>
           </div>
@@ -547,6 +552,61 @@
         </div>
         <div id="battle-log" class="battle-log"></div>
       </div>
+    </div>
+
+    <!-- 功能 Tab -->
+    <div class="tab-content panel-body" id="tab-tools" style="flex-direction:column; gap:10px;">
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">地图NPC</div>
+        <div class="battle-row">  
+          <span class="text-muted">当前地图NPC：</span>
+          <span id="battle-map-npc-from-packet" class="mono text-sm">—</span>
+        </div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">传送</div>
+        <div class="battle-row">
+          <span class="text-muted">地点：</span>
+          <select id="tool-teleport-destination" style="width:auto; min-width:160px; max-width:240px; padding:4px 8px; font-size:12px;"></select>
+          <button class="btn btn-primary btn-sm" onclick="sendTeleportPacket()">发送传送</button>
+        </div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">每日签到</div>
+        <div class="battle-row">  
+          <button class="btn btn-primary btn-sm" onclick="sendDailyCheckinPacket()">发送签到</button>
+        </div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">角色加点</div>
+        <div class="battle-row">
+          <span class="text-muted">属性：</span>
+          <select id="tool-role-attr" style="width:auto; min-width:120px; max-width:180px; padding:4px 8px; font-size:12px;">
+            <option value="00">力量</option>
+            <option value="01">智力</option>
+            <option value="02">敏捷</option>
+            <option value="03">体质</option>
+          </select>
+          <span class="text-muted">加点数量：</span>
+          <input type="text" id="tool-role-points" inputmode="numeric" autocomplete="off" placeholder="0~65535" style="width:180px; padding:4px 8px; font-size:12px;">
+          <button class="btn btn-primary btn-sm" onclick="sendRoleStatPacket()">发送加点</button>
+        </div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">运输物资</div>
+        <div class="battle-row">
+          <button class="btn btn-primary btn-sm" id="btn-transport-supply" onclick="toggleTransportSupplyFlow()">开始运输物资</button>
+          <span class="text-muted text-sm">流程：购买 → 等待 60s → 交付 → 等待下行指纹含 e8030100e60（如 e607）；最多 10 轮；若服务器提示购买达上限则自动停止。</span>
+        </div>
+        <div id="tool-transport-supply-log" class="mt-8"><div class="text-muted text-sm">点击开始后按轮次执行…</div></div>
+      </div>
+
+      <div id="tool-send-result"></div>
     </div>
 
     <!-- 报文探测 Tab -->

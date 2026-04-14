@@ -54,7 +54,17 @@ def build_exchange_wuling_packet() -> str:
 
 
 def build_buy_item_packet(item_code: str) -> str:
-    code = _normalize_hex(item_code, 22, "item_code")
+    """
+    购买包中间 22 位 hex = 当前地图 NPC id（8 位）+ 物品编码（14 位 hex，与 buy_items / 前端一致）。
+    NPC id 来自下行地图列表包解析，存于 session.current_map_npc_id_hex。
+    """
+    session = get_session()
+    with session._lock:
+        npc_id = (session.current_map_npc_id_hex or "").strip().lower()
+    if len(npc_id) != 8:
+        raise ValueError("当前地图 NPC id 未知，请先进入地图并等待 NPC 列表下行包（e803…4d4f/db07）")
+    tail = _normalize_hex(item_code, 14, "item_code")
+    code = _normalize_hex(npc_id + tail, 22, "npc_id(8)+item_code(14)")
     return "27000000e8030d00fe03" + random_num_hex4() + "f5051004000015000000" + code + "00000000000001000000"
 
 

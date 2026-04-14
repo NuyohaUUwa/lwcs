@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any
 
 from core.codec import extract_utf8_segments, extract_packet_fingerprint
 from core.session import get_session
+from features.map_npc_parse import compute_map_npc_for_packet
 from paths import FINGERPRINTS_FILE as _FINGERPRINTS_FILE
 from services.packet_log_service import append_packet_record
 
@@ -217,7 +218,15 @@ def record_packet(raw_bytes_or_hex, direction: str) -> Optional[PacketRecord]:
     )
 
     record_dict = record.to_dict()
+    map_npc = compute_map_npc_for_packet(
+        direction=record.direction,
+        fingerprint=fingerprint,
+        raw_hex=raw_hex,
+    )
+    record_dict["map_npc"] = map_npc
     session = get_session()
+    if map_npc and map_npc.get("id_hex"):
+        session.set_current_map_npc(str(map_npc["id_hex"]), str(map_npc.get("utf8_text", "")))
     session.append_packet(record_dict)
     append_packet_record(record_dict)
     return record

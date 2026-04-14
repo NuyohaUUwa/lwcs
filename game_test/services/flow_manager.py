@@ -640,6 +640,9 @@ def select_role_flow(role_id: str) -> dict:
         session.reconnect_banned_until_ts = 0.0
         _set_status("connected")
 
+        # 选角成功后、启动收发包线程前再清一次队列，防止任意路径下残留的待发 hex 在新连接上发出
+        session.discard_send_queue()
+
         runtime = start_connection_runtime(
             lambda data: handle_incoming_packet(data, already_framed=True),
             _default_disconnect_handler,

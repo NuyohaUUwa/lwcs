@@ -20,6 +20,7 @@ from config import API_DEBUG, API_HOST, API_PORT, GAME_SERVERS, LOGIN_SERVERS
 from core.session import get_session
 from features.backpack import get_backpack_snapshot
 from features.battle import get_auto_use_rules, set_auto_use_rules
+from features.map_npc_parse import extract_map_npc_hit
 from features.packet_probe import annotate_packet, get_all_fingerprints, send_probe_packet, try_parse_packet
 from features.role_stats import STAT_GROUPS, STAT_NAMES
 from features.teleport import get_teleport_destinations
@@ -375,6 +376,17 @@ def api_probe_parse():
     if not hex_str:
         return jsonify({"ok": False, "error": "hex 不能为空"}), 400
     return jsonify({"ok": True, "parsed": try_parse_packet(hex_str)})
+
+
+@app.route("/api/map-npc/parse", methods=["POST"])
+def api_map_npc_parse():
+    """解析整包 hex 中的「当前地图 NPC」"""
+    body = request.get_json(silent=True) or {}
+    hex_str = str(body.get("raw_hex", body.get("hex", ""))).replace(" ", "").lower()
+    if not hex_str:
+        return jsonify({"ok": False, "error": "raw_hex 不能为空"}), 400
+    hit = extract_map_npc_hit(hex_str)
+    return jsonify({"ok": True, "map_npc": hit})
 
 
 @app.route("/api/events", methods=["GET"])
