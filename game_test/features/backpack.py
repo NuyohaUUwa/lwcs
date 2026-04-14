@@ -9,7 +9,7 @@ import binascii
 
 from core.codec import find_all_positions, slice_game_frame_hex_at
 from core.session import get_session, Item
-from features.role_stats import merge_role_stats_from_packet
+from features.role_stats import merge_role_stats_from_packet, update_session_stats
 
 # 权威背包列表指纹（与下行 hex 偏移 [8:20] 对齐，12 hex 字符）
 _AUTH_BACKPACK_LIST_FP = "e8030100d607"
@@ -146,7 +146,15 @@ def _parse_embedded_obtained_packets(packet_hex: str) -> bool:
             continue
         if session.apply_optimistic_obtain_items(_items_for_obtain_and_bought(sub_packet)):
             changed = True
-        merge_role_stats_from_packet(sub_packet)
+        with session._lock:
+            full_next = session.role_stats_full_refresh_on_next_ed07
+        if full_next:
+            if not update_session_stats(sub_packet):
+                merge_role_stats_from_packet(sub_packet)
+            with session._lock:
+                session.role_stats_full_refresh_on_next_ed07 = False
+        else:
+            merge_role_stats_from_packet(sub_packet)
         start = idx + len(marker)
     return changed
 
