@@ -18,12 +18,35 @@ def _normalize_hex(value: str, expected_len: int, name: str) -> str:
     return clean
 
 
+def _normalize_hex_even_range(value: str, min_len: int, max_len: int, name: str) -> str:
+    clean = str(value or "").strip().lower()
+    if len(clean) < min_len or len(clean) > max_len or len(clean) % 2 != 0:
+        raise ValueError(f"{name} 必须是 {min_len}~{max_len} 位且偶数长度的 hex")
+    try:
+        int(clean, 16)
+    except ValueError as e:
+        raise ValueError(f"{name} 不是合法 hex") from e
+    return clean
+
+
 def build_use_item_packets(item_id: str, quantity: int = 1) -> list[str]:
     packets = []
     for _ in range(quantity):
         random_num = random_num_hex6()
         packets.append(
             "1e000000e80308000404" + random_num + "050d0400000c00000000" + item_id + "0000010000"
+        )
+    return packets
+
+
+def build_use_item_packets_for_item_code(item_code: str, quantity: int = 1) -> list[str]:
+    """按物品编码构造使用物品报文（支持 4~20 位且偶数长度 hex，不依赖背包 item_id 字段名）。"""
+    code = _normalize_hex_even_range(item_code, 4, 20, "item_code")
+    packets = []
+    for _ in range(max(1, int(quantity))):
+        random_num = random_num_hex6()
+        packets.append(
+            "1e000000e80308000404" + random_num + "050d0400000c00000000" + code + "0000010000"
         )
     return packets
 

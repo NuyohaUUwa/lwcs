@@ -27,12 +27,15 @@ from features.teleport import get_teleport_destinations
 from services.action_manager import send_action
 from services.data_manager import (
     delete_buy_item,
+    delete_liaoguo_pair,
     delete_quick_login,
     get_monsters,
     load_buy_items,
+    load_liaoguo_pairs,
     load_quick_logins,
     save_monsters,
     upsert_buy_item,
+    upsert_liaoguo_pair,
     upsert_quick_login,
 )
 from services.flow_manager import (
@@ -307,6 +310,22 @@ def api_buy_items_save():
 @app.route("/api/buy-items/<item_id>", methods=["DELETE"])
 def api_buy_items_delete(item_id: str):
     return jsonify(delete_buy_item(item_id))
+
+
+@app.route("/api/liaoguo-pairs", methods=["GET"])
+def api_liaoguo_pairs_get():
+    return jsonify({"ok": True, "items": load_liaoguo_pairs()})
+
+
+@app.route("/api/liaoguo-pairs", methods=["POST"])
+def api_liaoguo_pairs_save():
+    body = request.get_json(silent=True) or {}
+    return _json_ok(upsert_liaoguo_pair(body))
+
+
+@app.route("/api/liaoguo-pairs/<item_id>", methods=["DELETE"])
+def api_liaoguo_pairs_delete(item_id: str):
+    return jsonify(delete_liaoguo_pair(item_id))
 
 
 @app.route("/api/packets", methods=["GET"])

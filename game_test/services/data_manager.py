@@ -9,7 +9,7 @@ import time
 
 from features.battle import DEFAULT_MONSTERS
 from core.session import get_session
-from paths import BUY_ITEMS_FILE, MONSTERS_FILE, QUICK_LOGINS_FILE
+from paths import BUY_ITEMS_FILE, LIAOGUO_PAIRS_FILE, MONSTERS_FILE, QUICK_LOGINS_FILE
 
 
 def _read_json_file(path: str, default):
@@ -179,4 +179,114 @@ def delete_buy_item(item_id: str):
     items = load_buy_items()
     new_items = [x for x in items if x.get("id") != item_id]
     save_buy_items(new_items)
+    return {"ok": True, "items": new_items}
+
+
+def load_liaoguo_pairs():
+    data = _read_json_file(LIAOGUO_PAIRS_FILE, [])
+    items = data if isinstance(data, list) else []
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_code = str(item.get("itemCode", "")).strip().lower()
+        monster_code = str(item.get("monsterCode", "")).strip().lower()
+        label = str(item.get("label", "")).strip()
+        task_name = str(item.get("taskName", "")).strip()
+        ticket_item_code = str(item.get("ticketItemCode", "")).strip().lower()
+        abandon_task_code = str(item.get("abandonTaskCode", "21a1")).strip().lower()
+        if len(item_code) != 14 or len(monster_code) != 4:
+            continue
+        if not label or not task_name:
+            continue
+        if len(abandon_task_code) != 4:
+            continue
+        if (
+            not ticket_item_code
+            or len(ticket_item_code) < 4
+            or len(ticket_item_code) > 20
+            or len(ticket_item_code) % 2 != 0
+        ):
+            continue
+        try:
+            int(item_code, 16)
+            int(monster_code, 16)
+            int(ticket_item_code, 16)
+            int(abandon_task_code, 16)
+        except ValueError:
+            continue
+        out.append(
+            {
+                "id": task_name,
+                "itemCode": item_code,
+                "monsterCode": monster_code,
+                "label": label,
+                "taskName": task_name,
+                "ticketItemCode": ticket_item_code,
+                "abandonTaskCode": abandon_task_code,
+            }
+        )
+    return out
+
+
+def save_liaoguo_pairs(items):
+    _write_json_file(LIAOGUO_PAIRS_FILE, items)
+
+
+def upsert_liaoguo_pair(body: dict):
+    item_code = str(body.get("itemCode", "")).strip().lower()
+    monster_code = str(body.get("monsterCode", "")).strip().lower()
+    label = str(body.get("label", "")).strip()
+    task_name = str(body.get("taskName", "")).strip()
+    ticket_item_code = str(body.get("ticketItemCode", "")).strip().lower()
+    abandon_task_code = str(body.get("abandonTaskCode", "21a1")).strip().lower()
+    if len(item_code) != 14:
+        return {"ok": False, "error": "itemCode 必须是 14 位 hex"}
+    if len(monster_code) != 4:
+        return {"ok": False, "error": "monsterCode 必须是 4 位 hex"}
+    if not label:
+        return {"ok": False, "error": "label 不能为空"}
+    if not task_name:
+        return {"ok": False, "error": "taskName 不能为空"}
+    if not ticket_item_code:
+        return {"ok": False, "error": "ticketItemCode 不能为空"}
+    if len(ticket_item_code) < 4 or len(ticket_item_code) > 20 or len(ticket_item_code) % 2 != 0:
+        return {"ok": False, "error": "ticketItemCode 必须是 4~20 位且偶数长度的 hex"}
+    if len(abandon_task_code) != 4:
+        return {"ok": False, "error": "abandonTaskCode 必须是 4 位 hex"}
+    try:
+        int(item_code, 16)
+        int(monster_code, 16)
+        int(ticket_item_code, 16)
+        int(abandon_task_code, 16)
+    except ValueError:
+        return {"ok": False, "error": "itemCode/monsterCode/ticketItemCode/abandonTaskCode 不是合法 hex"}
+    entry = {
+        "id": task_name,
+        "itemCode": item_code,
+        "monsterCode": monster_code,
+        "label": label,
+        "taskName": task_name,
+        "ticketItemCode": ticket_item_code,
+        "abandonTaskCode": abandon_task_code,
+    }
+    items = load_liaoguo_pairs()
+    replaced = False
+    for i, old in enumerate(items):
+        if old.get("id") == entry["id"]:
+            items[i] = entry
+            replaced = True
+            break
+    if not replaced:
+        items.append(entry)
+    items.sort(key=lambda x: x.get("label", ""))
+    save_liaoguo_pairs(items)
+    return {"ok": True, "items": items, "saved_id": entry["id"]}
+
+
+def delete_liaoguo_pair(item_id: str):
+    item_id = (item_id or "").strip().lower()
+    items = load_liaoguo_pairs()
+    new_items = [x for x in items if (x.get("id") or "").lower() != item_id]
+    save_liaoguo_pairs(new_items)
     return {"ok": True, "items": new_items}

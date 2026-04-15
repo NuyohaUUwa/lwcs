@@ -35,6 +35,7 @@ _LAUNCH_HOST = "127.0.0.1"
 _INSTANCE_JSON_NAMES = (
     "quick_logins.json",
     "buy_items.json",
+    "liaoguo_pairs.json",
     "auto_use_rules.json",
     "annotations.json",
 )

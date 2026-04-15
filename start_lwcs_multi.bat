@@ -8,4 +8,4 @@ call conda activate lwcs
 
 python -m game_test.instance_tool
 
-pause
+exit /b %errorlevel%

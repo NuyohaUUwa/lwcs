@@ -156,7 +156,7 @@
     border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
     padding: 8px; min-height: 80px; max-height: 180px; overflow-y: auto; font-size: 12px;
   }
-  #tool-transport-supply-log {
+  #tool-transport-supply-log, #tool-liaoguo-log {
     border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
     padding: 8px; min-height: 80px; max-height: 220px; overflow-y: auto; font-size: 12px;
   }
@@ -606,9 +606,34 @@
         <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">运输物资</div>
         <div class="battle-row">
           <button class="btn btn-primary btn-sm" id="btn-transport-supply" onclick="toggleTransportSupplyFlow()">开始运输物资</button>
-          <span class="text-muted text-sm">流程：购买 → 等待 60s → 交付 → 等待下行指纹含 e8030100e60（如 e607）；最多 10 轮；若服务器提示购买达上限则自动停止。</span>
+          <span class="text-muted text-sm">流程：购买 → 等待 60s → 交付 → 等待下行；最多 10 轮；若服务器提示购买达上限则自动停止。</span>
         </div>
         <div id="tool-transport-supply-log" class="mt-8"><div class="text-muted text-sm">点击开始后按轮次执行…</div></div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">辽国战斗</div>
+        <div class="battle-row">
+          <select id="liaoguo-pair-select" style="min-width:300px; max-width:460px; padding:4px 8px; font-size:12px;"></select>
+          <button class="btn btn-primary btn-sm" id="btn-liaoguo-run" onclick="toggleLiaoguoFlow()">启动辽国战斗</button>
+        </div>
+        <div class="battle-row mt-8">
+          <span class="text-muted">任务：</span>
+          <input type="text" id="liaoguo-task-name" placeholder="任务名称，例如 辽国情报（简单）任务" style="min-width:120px; max-width:200px;">
+          <span class="text-muted">任务目标：</span>
+          <input type="text" id="liaoguo-label" placeholder="显示名，例如 辽国士兵" style="min-width:120px; max-width:200px;">
+          <span class="text-muted">购买itemcode：</span>
+          <input type="text" id="liaoguo-item-code" placeholder="14位 itemcode，例如 2179d090000000" style="min-width:120px; max-width:200px;">
+          <span class="text-muted">任务券itemcode：</span>  
+          <input type="text" id="liaoguo-ticket-item-code" placeholder="任务券 itemcode（来自已保存的辽国映射）" style="min-width:120px; max-width:200px;">
+          <span class="text-muted">放弃任务code：</span>
+          <input type="text" id="liaoguo-abandon-task-code" placeholder="放弃任务 code（4位hex，默认 21a1）" style="min-width:120px; max-width:200px;">
+          <span class="text-muted">怪物code：</span>
+          <input type="text" id="liaoguo-monster-code" placeholder="4位 monster，例如 dd37" style="width:180px;">
+          <button class="btn btn-ghost btn-sm" onclick="saveLiaoguoPair()">保存/更新映射</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteLiaoguoPair()">删除当前映射</button>
+        </div>
+        <div id="tool-liaoguo-log" class="mt-8"><div class="text-muted text-sm">流程：购买任务券(e607) → 放弃任务(e807) → 使用任务券(ec07) → 单次战斗(e207)。</div></div>
       </div>
 
       <div id="tool-send-result"></div>

@@ -111,11 +111,31 @@ def dispatch_feature_action(action_name: str, payload: Dict[str, Any]) -> dict:
 
     if action_name == "item.use":
         item_id = str(payload.get("item_id", "")).strip().lower()
+        item_code = str(payload.get("item_code", "")).strip().lower()
         quantity = int(payload.get("quantity", 1))
-        if not item_id:
-            return {"ok": False, "error": "item_id 不能为空"}
         if quantity <= 0:
             return {"ok": False, "error": "数量必须大于0"}
+        if item_code:
+            try:
+                packet_list = item_use.build_use_item_packets_for_item_code(item_code, quantity)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            queued = 0
+            warnings = []
+            for packet_hex in packet_list:
+                res = send_raw_action(packet_hex, priority=10, use_queue=True)
+                if not res.get("ok"):
+                    return res
+                queued += 1
+                if res.get("validation_warning"):
+                    warnings.append(res["validation_warning"])
+            session.notify_backpack_update()
+            result = {"ok": True, "queued": queued, "item_code": item_code}
+            if warnings:
+                result["validation_warning"] = " | ".join(dict.fromkeys(warnings))
+            return result
+        if not item_id:
+            return {"ok": False, "error": "item_id 或 item_code 不能为空"}
         ok, err = item_use.optimistic_consume_item(item_id, quantity)
         if not ok:
             return {"ok": False, "error": err}

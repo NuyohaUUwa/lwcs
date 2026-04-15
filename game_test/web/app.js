@@ -24,6 +24,14 @@ let starStoneTimer = null;
 let transportSupplyRunning = false;
 let transportSupplyStopRequested = false;
 let transportSupplyWaiter = null;
+let transportSupplyPendingRewardUses = 0;
+let liaoguoRunning = false;
+let liaoguoStopRequested = false;
+let liaoguoPairs = [];
+let selectedLiaoguoPairKey = '';
+/** 辽国流程：等待下一帧 battle_settlement_e207（e8030100e207） */
+let liaoguoE207Waiter = null;
+let liaoguoPacketWaiters = [];
 let battleMonsters = [];
 let selectedMonsterCode = '';
 let battleLogMode = 'simple'; // simple | detail
@@ -43,6 +51,7 @@ const TRANSPORT_SUPPLY_BUY_ITEM_CODE = '022c9d09000000';
 const TRANSPORT_SUPPLY_DELIVER_TEMPLATE = `27000000e8030d00fe03cea8f5051004000015000000${TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER}02319d0900000000000000000000000000`;
 /** 下行完成指纹：用户描述为 e8030100e60，实际多为 e607 等，按前缀匹配 */
 const TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX = 'e8030100e60';
+const TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD = '通用10000储备金票';
 const TRANSPORT_SUPPLY_MAX_ROUNDS = 10;
 const TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS = 180000;
 /** 当前地图 NPC：由后端 Python 解析后随 SSE packet.map_npc 下发 */
@@ -103,12 +112,20 @@ function startSSE() {
         handleStarStonePacket(msg.data);
         handleTransportSupplyPacket(msg.data);
         handleMapNpcListDnPacket(msg.data);
+        notifyLiaoguoPacketWaiters(msg.data);
       }
       else if (msg.type === 'annotation') updatePacketAnnotation(msg.data);
       else if (msg.type === 'role_stats') renderRoleStats(msg.data);
       else if (msg.type === 'battle_response') onBattleResponse(msg.data);
       else if (msg.type === 'battle_end') onBattleEnd(msg.data);
-      else if (msg.type === 'battle_settlement_e207') onBattleSettlementE207(msg.data);
+      else if (msg.type === 'battle_settlement_e207') {
+        onBattleSettlementE207(msg.data);
+        if (liaoguoE207Waiter) {
+          const w = liaoguoE207Waiter;
+          liaoguoE207Waiter = null;
+          w.finish({ ok: true, data: msg.data });
+        }
+      }
       else if (msg.type === 'battle_not_killed') onBattleNotKilled(msg.data);
       else if (msg.type === 'battle_state') onBattleState(msg.data);
       else if (msg.type === 'control_log') onControlLog(msg.data);
@@ -1767,11 +1784,366 @@ function appendTransportSupplyLog(text, kind = 'info') {
   box.scrollTop = box.scrollHeight;
 }
 
+function appendLiaoguoLog(text, kind = 'info') {
+  const box = document.getElementById('tool-liaoguo-log');
+  if (!box) return;
+  if (box.querySelector('.text-muted.text-sm') && box.children.length === 1) {
+    box.innerHTML = '';
+  }
+  const line = document.createElement('div');
+  line.className = kind === 'err' ? 'text-red' : kind === 'ok' ? 'text-green' : 'text-muted';
+  line.textContent = text;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearLiaoguoPacketWaiters(reason = 'stopped') {
+  if (!liaoguoPacketWaiters.length) return;
+  const pending = liaoguoPacketWaiters;
+  liaoguoPacketWaiters = [];
+  pending.forEach((w) => {
+    if (w?.timer) clearTimeout(w.timer);
+    try { w?.resolve?.({ ok: false, reason }); } catch (_) {}
+  });
+}
+
+function notifyLiaoguoPacketWaiters(record) {
+  if (!liaoguoRunning || !record || record.direction !== 'DN') return;
+  const fp = String(record.fingerprint || '').toLowerCase();
+  if (!fp || !liaoguoPacketWaiters.length) return;
+  const pending = [];
+  liaoguoPacketWaiters.forEach((w) => {
+    if (fp.includes(w.targetFp)) {
+      if (w.timer) clearTimeout(w.timer);
+      w.resolve({ ok: true, record });
+    } else {
+      pending.push(w);
+    }
+  });
+  liaoguoPacketWaiters = pending;
+}
+
+function waitForLiaoguoFingerprint(targetFp, timeoutMs = 20000) {
+  const fp = String(targetFp || '').trim().toLowerCase();
+  if (!fp) return Promise.resolve({ ok: false, reason: 'invalid_target' });
+  return new Promise((resolve) => {
+    const waiter = {
+      targetFp: fp,
+      resolve,
+      timer: setTimeout(() => {
+        liaoguoPacketWaiters = liaoguoPacketWaiters.filter((x) => x !== waiter);
+        resolve({ ok: false, reason: 'timeout' });
+      }, Math.max(500, Number(timeoutMs) || 20000)),
+    };
+    liaoguoPacketWaiters.push(waiter);
+  });
+}
+
 function updateTransportSupplyButton() {
   const btn = document.getElementById('btn-transport-supply');
   if (!btn) return;
   btn.textContent = transportSupplyRunning ? '停止运输物资' : '开始运输物资';
   btn.className = transportSupplyRunning ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+}
+
+function updateLiaoguoButton() {
+  const btn = document.getElementById('btn-liaoguo-run');
+  if (!btn) return;
+  btn.textContent = liaoguoRunning ? '停止辽国战斗' : '启动辽国战斗';
+  btn.className = liaoguoRunning ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+}
+
+function normalizeLiaoguoPair(pair) {
+  const itemCode = String(pair?.itemCode || '').trim().toLowerCase();
+  const monsterCode = String(pair?.monsterCode || '').trim().toLowerCase();
+  const label = String(pair?.label || '').trim();
+  const taskName = String(pair?.taskName || '').trim();
+  const ticketItemCode = String(pair?.ticketItemCode || '').trim().toLowerCase();
+  const abandonTaskCode = String(pair?.abandonTaskCode || '21a1').trim().toLowerCase();
+  if (!/^[0-9a-f]{14}$/.test(itemCode)) return null;
+  if (!/^[0-9a-f]{4}$/.test(monsterCode)) return null;
+  if (!label) return null;
+  if (!taskName) return null;
+  if (!/^[0-9a-f]+$/.test(ticketItemCode) || ticketItemCode.length % 2 !== 0 || ticketItemCode.length < 4 || ticketItemCode.length > 20) return null;
+  if (!/^[0-9a-f]{4}$/.test(abandonTaskCode)) return null;
+  return {
+    id: taskName,
+    itemCode,
+    monsterCode,
+    label,
+    taskName,
+    ticketItemCode,
+    abandonTaskCode,
+  };
+}
+
+function getLiaoguoPairKey(pair) {
+  return String(pair?.id || pair?.taskName || '').trim();
+}
+
+async function loadLiaoguoPairs() {
+  const res = await api('GET', '/api/liaoguo-pairs').catch(() => null);
+  const list = Array.isArray(res?.items) ? res.items.map(normalizeLiaoguoPair).filter(Boolean) : [];
+  liaoguoPairs = list;
+  if (liaoguoPairs.length && !liaoguoPairs.some((p) => getLiaoguoPairKey(p) === selectedLiaoguoPairKey)) {
+    selectedLiaoguoPairKey = getLiaoguoPairKey(liaoguoPairs[0]);
+  } else if (!liaoguoPairs.length) {
+    selectedLiaoguoPairKey = '';
+  }
+  renderLiaoguoPairs();
+}
+
+function renderLiaoguoPairs() {
+  const select = document.getElementById('liaoguo-pair-select');
+  if (!select) return;
+  if (!liaoguoPairs.length) {
+    select.innerHTML = '<option value="">暂无辽国映射，请先新增并保存</option>';
+    select.value = '';
+    const itemEl = document.getElementById('liaoguo-item-code');
+    const monsterEl = document.getElementById('liaoguo-monster-code');
+    const labelEl = document.getElementById('liaoguo-label');
+    const taskEl = document.getElementById('liaoguo-task-name');
+    const ticketEl = document.getElementById('liaoguo-ticket-item-code');
+    const abandonEl = document.getElementById('liaoguo-abandon-task-code');
+    if (itemEl) itemEl.value = '';
+    if (monsterEl) monsterEl.value = '';
+    if (labelEl) labelEl.value = '';
+    if (taskEl) taskEl.value = '';
+    if (ticketEl) ticketEl.value = '';
+    if (abandonEl) abandonEl.value = '';
+    return;
+  }
+  select.innerHTML = liaoguoPairs
+    .map((p) => {
+      const key = getLiaoguoPairKey(p);
+      return `<option value="${escAttr(key)}">${escHtml(p.itemCode)} - ${escHtml(p.label)} - ${escHtml(p.monsterCode)} - ${escHtml(p.taskName || '')}</option>`;
+    })
+    .join('');
+  select.value = selectedLiaoguoPairKey;
+  applySelectedLiaoguoPairToInputs();
+}
+
+function applySelectedLiaoguoPairToInputs() {
+  const pair = liaoguoPairs.find((p) => getLiaoguoPairKey(p) === selectedLiaoguoPairKey);
+  if (!pair) return;
+  const itemEl = document.getElementById('liaoguo-item-code');
+  const monsterEl = document.getElementById('liaoguo-monster-code');
+  const labelEl = document.getElementById('liaoguo-label');
+  const taskEl = document.getElementById('liaoguo-task-name');
+  const ticketEl = document.getElementById('liaoguo-ticket-item-code');
+  const abandonEl = document.getElementById('liaoguo-abandon-task-code');
+  if (itemEl) itemEl.value = pair.itemCode;
+  if (monsterEl) monsterEl.value = pair.monsterCode;
+  if (labelEl) labelEl.value = pair.label;
+  if (taskEl) taskEl.value = pair.taskName;
+  if (ticketEl) ticketEl.value = pair.ticketItemCode;
+  if (abandonEl) abandonEl.value = pair.abandonTaskCode;
+}
+
+function onLiaoguoPairSelectChange() {
+  const select = document.getElementById('liaoguo-pair-select');
+  selectedLiaoguoPairKey = String(select?.value || '').trim();
+  applySelectedLiaoguoPairToInputs();
+}
+
+async function saveLiaoguoPair() {
+  const pair = normalizeLiaoguoPair({
+    itemCode: document.getElementById('liaoguo-item-code')?.value || '',
+    monsterCode: document.getElementById('liaoguo-monster-code')?.value || '',
+    taskName: document.getElementById('liaoguo-task-name')?.value || '',
+    label: document.getElementById('liaoguo-label')?.value || '',
+    ticketItemCode: document.getElementById('liaoguo-ticket-item-code')?.value || '',
+    abandonTaskCode: document.getElementById('liaoguo-abandon-task-code')?.value || '',
+  });
+  if (!pair) {
+    setToolResult('辽国映射不合法：itemcode 需14位hex、monster 需4位hex、label/taskName 不能为空、任务券 itemcode 需为偶数位hex、放弃任务code 需4位hex', 'err');
+    return;
+  }
+  const saveRes = await api('POST', '/api/liaoguo-pairs', pair).catch(() => null);
+  if (!saveRes?.ok) {
+    setToolResult(saveRes?.error || '保存辽国映射失败', 'err');
+    return;
+  }
+  liaoguoPairs = Array.isArray(saveRes.items) ? saveRes.items.map(normalizeLiaoguoPair).filter(Boolean) : [{ ...pair }];
+  selectedLiaoguoPairKey = getLiaoguoPairKey(pair);
+  renderLiaoguoPairs();
+  setToolResult(`辽国映射已保存：${pair.itemCode} - ${pair.label} - ${pair.monsterCode} - ${pair.taskName} - 任务券 ${pair.ticketItemCode} - 放弃任务 ${pair.abandonTaskCode}`, 'ok');
+}
+
+async function deleteLiaoguoPair() {
+  if (!selectedLiaoguoPairKey) return;
+  const res = await api('DELETE', `/api/liaoguo-pairs/${encodeURIComponent(selectedLiaoguoPairKey)}`).catch(() => null);
+  if (!res?.ok) {
+    setToolResult(res?.error || '删除辽国映射失败', 'err');
+    return;
+  }
+  liaoguoPairs = Array.isArray(res.items) ? res.items.map(normalizeLiaoguoPair).filter(Boolean) : [];
+  selectedLiaoguoPairKey = liaoguoPairs.length ? getLiaoguoPairKey(liaoguoPairs[0]) : '';
+  renderLiaoguoPairs();
+  setToolResult('辽国映射已删除', 'ok');
+}
+
+function getSelectedLiaoguoPair() {
+  return liaoguoPairs.find((p) => getLiaoguoPairKey(p) === selectedLiaoguoPairKey) || null;
+}
+
+function getLiaoguoTicketItemCode() {
+  const el = document.getElementById('liaoguo-ticket-item-code');
+  const raw = String(el?.value || '').trim().toLowerCase();
+  if (!raw) {
+    throw new Error('任务券 itemcode 不能为空，请先在辽国映射中配置并保存');
+  }
+  if (!/^[0-9a-f]+$/.test(raw) || raw.length % 2 !== 0 || raw.length < 4 || raw.length > 20) {
+    throw new Error('任务券 itemcode 不合法：需为偶数位 hex');
+  }
+  return raw;
+}
+
+function getLiaoguoAbandonTaskCode() {
+  const el = document.getElementById('liaoguo-abandon-task-code');
+  const raw = String(el?.value || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{4}$/.test(raw)) {
+    throw new Error('放弃任务 code 不合法：需为 4 位 hex');
+  }
+  return raw;
+}
+
+function buildLiaoguoAbandonTaskPacket(abandonTaskCode) {
+  return `18000000e80306000004${randomNumHex4()}f5050304000006000000${abandonTaskCode}07000000`;
+}
+
+function toggleLiaoguoFlow() {
+  if (liaoguoRunning) {
+    liaoguoStopRequested = true;
+    clearLiaoguoPacketWaiters('stopped');
+    if (liaoguoE207Waiter) {
+      const w = liaoguoE207Waiter;
+      liaoguoE207Waiter = null;
+      w.finish({ ok: false, reason: 'stopped' });
+    }
+    appendLiaoguoLog('已请求停止…', 'info');
+    return;
+  }
+  runLiaoguoFlow();
+}
+
+function waitForLiaoguoBattleE207Settlement(timeoutMs = 120000) {
+  return new Promise((resolve) => {
+    const waiter = {
+      t: null,
+      finish(payload) {
+        if (waiter.t) clearTimeout(waiter.t);
+        if (liaoguoE207Waiter === waiter) liaoguoE207Waiter = null;
+        resolve(payload);
+      },
+    };
+    waiter.t = setTimeout(() => waiter.finish({ ok: false, reason: 'timeout' }), timeoutMs);
+    liaoguoE207Waiter = waiter;
+  });
+}
+
+async function runLiaoguoFlow() {
+  if (liaoguoRunning) return;
+  const pair = getSelectedLiaoguoPair();
+  if (!pair) {
+    setToolResult('请先配置辽国映射', 'err');
+    return;
+  }
+  liaoguoRunning = true;
+  liaoguoStopRequested = false;
+  updateLiaoguoButton();
+  const log = document.getElementById('tool-liaoguo-log');
+  if (log) log.innerHTML = '';
+  appendLiaoguoLog(`开始：${pair.itemCode} - ${pair.label} - ${pair.monsterCode} - ${pair.taskName}`, 'ok');
+  try {
+    const npcId = getCurrentBuyNpcId();
+
+    appendLiaoguoLog(`步骤1/4 兑换任务券（NPC ${npcId}）…`, 'info');
+    const buyRes = await buyByNpcAndItemCode(npcId, pair.itemCode);
+    if (!buyRes?.ok) {
+      appendLiaoguoLog(`兑换任务券失败：${buyRes?.error || '未知错误'}`, 'err');
+      setToolResult(`辽国战斗失败：${buyRes?.error || '兑换任务券失败'}`, 'err');
+      return;
+    }
+    const buyAck = await waitForLiaoguoFingerprint('e8030100e607', 20000);
+    if (liaoguoStopRequested || buyAck.reason === 'stopped') return;
+    if (!buyAck.ok) {
+      appendLiaoguoLog('未在时限内收到购买成功响应 e8030100e607', 'err');
+      setToolResult('辽国战斗失败：未确认购买成功（e607 超时）', 'err');
+      return;
+    }
+    appendLiaoguoLog('已收到购买成功响应 e8030100e607', 'ok');
+    if (liaoguoStopRequested) return;
+
+    const abandonTaskCode = getLiaoguoAbandonTaskCode();
+    const abandonPacketHex = buildLiaoguoAbandonTaskPacket(abandonTaskCode);
+    appendLiaoguoLog(`步骤2/4 放弃任务（code ${abandonTaskCode}）…`, 'info');
+    const abandonRes = await api('POST', '/api/probe/send', { hex: abandonPacketHex, use_queue: true });
+    if (!abandonRes?.ok) {
+      appendLiaoguoLog(`放弃任务失败：${abandonRes?.error || '未知错误'}`, 'err');
+      setToolResult(`辽国战斗失败：${abandonRes?.error || '放弃任务失败'}`, 'err');
+      return;
+    }
+    const abandonAck = await waitForLiaoguoFingerprint('e8030100e807', 20000);
+    if (liaoguoStopRequested || abandonAck.reason === 'stopped') return;
+    if (!abandonAck.ok) {
+      appendLiaoguoLog('未在时限内收到放弃任务响应 e8030100e807', 'err');
+      setToolResult('辽国战斗失败：未确认放弃任务（e807 超时）', 'err');
+      return;
+    }
+    appendLiaoguoLog('已收到放弃任务响应 e8030100e807', 'ok');
+
+    const ticketItemCode = getLiaoguoTicketItemCode();
+    appendLiaoguoLog(`步骤3/4 使用任务券（按任务券 itemcode 发使用物品报文：${ticketItemCode}）…`, 'info');
+    const useRes = await api('POST', '/api/item/use', { item_code: ticketItemCode, quantity: 1 });
+    if (!useRes?.ok) {
+      appendLiaoguoLog(`使用任务券失败：${useRes?.error || '未知错误'}`, 'err');
+      setToolResult(`辽国战斗失败：${useRes?.error || '使用任务券失败'}`, 'err');
+      return;
+    }
+    const useAck = await waitForLiaoguoFingerprint('e8030100ec07', 20000);
+    if (liaoguoStopRequested || useAck.reason === 'stopped') return;
+    if (!useAck.ok) {
+      appendLiaoguoLog('未在时限内收到已接受任务响应 e8030100ec07', 'err');
+      setToolResult('辽国战斗失败：未确认任务已接受（ec07 超时）', 'err');
+      return;
+    }
+    appendLiaoguoLog('已收到已接受任务响应 e8030100ec07', 'ok');
+    if (liaoguoStopRequested) return;
+
+    appendLiaoguoLog(`步骤4/4 辽国战斗（怪物 ${pair.monsterCode}），等待结算 e8030100e207…`, 'info');
+    const battleRes = await api('POST', '/api/battle/start', {
+      monster_code: pair.monsterCode,
+      run_pre_battle_actions: true,
+    });
+    if (!battleRes?.ok) {
+      appendLiaoguoLog(`战斗启动失败：${battleRes?.error || '未知错误'}`, 'err');
+      setToolResult(`辽国战斗失败：${battleRes?.error || '战斗启动失败'}`, 'err');
+      return;
+    }
+    const settle = await waitForLiaoguoBattleE207Settlement(120000);
+    if (liaoguoStopRequested || settle.reason === 'stopped') return;
+    if (!settle.ok) {
+      appendLiaoguoLog('未在时限内收到战斗结算 e8030100e207，请查看战斗面板', 'err');
+      setToolResult('辽国战斗未确认完成（超时）', 'err');
+      return;
+    }
+    appendLiaoguoLog('已收到 e8030100e207，流程完成', 'ok');
+    setToolResult(`辽国战斗完成：${pair.label} (${pair.monsterCode})`, 'ok');
+  } catch (err) {
+    appendLiaoguoLog(`流程异常：${err?.message || '未知错误'}`, 'err');
+    setToolResult(`辽国战斗失败：${err?.message || '未知错误'}`, 'err');
+  } finally {
+    clearLiaoguoPacketWaiters('aborted');
+    if (liaoguoE207Waiter) {
+      const w = liaoguoE207Waiter;
+      liaoguoE207Waiter = null;
+      w.finish({ ok: false, reason: 'aborted' });
+    }
+    liaoguoRunning = false;
+    liaoguoStopRequested = false;
+    updateLiaoguoButton();
+  }
 }
 
 function formatTransportSupplyPacketHint(record) {
@@ -1794,6 +2166,73 @@ function isTransportSupplyCompletionPacket(record) {
   if (!record || record.direction !== 'DN') return false;
   const fp = String(record.fingerprint || '').toLowerCase();
   return fp.includes(TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX);
+}
+
+function findTransportSupplyRewardItem() {
+  return backpackItemsCache.find((item) => {
+    const name = String(item?.name || '');
+    const qty = Number(item?.quantity || 0);
+    return qty > 0 && name.includes(TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD);
+  });
+}
+
+async function tryAutoUseTransportSupplyRewardOnce() {
+  const rewardItem = findTransportSupplyRewardItem();
+  if (!rewardItem?.item_id) {
+    return { ok: false, used: false, reason: 'not_found' };
+  }
+  const res = await api('POST', '/api/item/use', { item_id: rewardItem.item_id, quantity: 1 });
+  if (!res?.ok) {
+    return { ok: false, used: false, reason: 'use_failed', error: res?.error || '未知错误' };
+  }
+  return {
+    ok: true,
+    used: true,
+    itemName: String(rewardItem.name || TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD),
+    itemId: String(rewardItem.item_id || ''),
+  };
+}
+
+async function waitTransportSupplyWithRewardAutoUse(waitMs, isStopped, round) {
+  const step = 500;
+  const retryIntervalMs = 1200;
+  let left = Math.max(0, waitMs);
+  let rewardRetryLeftMs = 0;
+  let loggedNotFound = false;
+  while (left > 0) {
+    if (isStopped()) return false;
+    if (transportSupplyPendingRewardUses > 0) {
+      if (rewardRetryLeftMs <= 0) {
+        const useRes = await tryAutoUseTransportSupplyRewardOnce();
+        if (useRes.ok && useRes.used) {
+          transportSupplyPendingRewardUses = Math.max(0, transportSupplyPendingRewardUses - 1);
+          loggedNotFound = false;
+          appendTransportSupplyLog(
+            `第 ${round} 轮等待中：已自动使用奖励「${useRes.itemName}」×1（剩余待使用 ${transportSupplyPendingRewardUses}）`,
+            'ok'
+          );
+          rewardRetryLeftMs = 300;
+        } else if (useRes.reason === 'not_found') {
+          if (!loggedNotFound) {
+            appendTransportSupplyLog(`第 ${round} 轮等待中：未在背包找到「${TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD}」，继续等待并重试`, 'info');
+            loggedNotFound = true;
+          }
+          rewardRetryLeftMs = retryIntervalMs;
+        } else {
+          appendTransportSupplyLog(
+            `第 ${round} 轮等待中：自动使用奖励失败（${useRes.error || '未知错误'}），稍后重试`,
+            'err'
+          );
+          rewardRetryLeftMs = retryIntervalMs;
+        }
+      }
+    }
+    const chunk = Math.min(step, left);
+    await new Promise((r) => setTimeout(r, chunk));
+    left -= chunk;
+    rewardRetryLeftMs = Math.max(0, rewardRetryLeftMs - chunk);
+  }
+  return !isStopped();
 }
 
 function clearTransportSupplyWaiter(result) {
@@ -1876,6 +2315,7 @@ async function runTransportSupplyFlow() {
   if (transportSupplyRunning) return;
   transportSupplyRunning = true;
   transportSupplyStopRequested = false;
+  transportSupplyPendingRewardUses = 0;
   updateTransportSupplyButton();
   const log = document.getElementById('tool-transport-supply-log');
   if (log) log.innerHTML = '';
@@ -1904,8 +2344,8 @@ async function runTransportSupplyFlow() {
       await sleepInterruptible(800, isStopped);
       if (isStopped()) break;
 
-      appendTransportSupplyLog('等待 60 秒后交付物资…', 'info');
-      const waited = await sleepInterruptible(60000, isStopped);
+      appendTransportSupplyLog('等待 60 秒后交付物资…（期间自动使用上一轮奖励）', 'info');
+      const waited = await waitTransportSupplyWithRewardAutoUse(60000, isStopped, round);
       if (!waited || isStopped()) {
         appendTransportSupplyLog('已停止（等待交付阶段中断）', 'info');
         break;
@@ -1944,14 +2384,35 @@ async function runTransportSupplyFlow() {
       const summary = formatTransportSupplyPacketHint(doneRec);
       appendTransportSupplyLog(`第 ${round} 轮：完成。${summary}`, 'ok');
       setToolResult(`运输物资 第 ${round} 轮完成：${summary}`, 'ok');
+      transportSupplyPendingRewardUses += 1;
+      const isLastRound = round >= TRANSPORT_SUPPLY_MAX_ROUNDS;
+      if (isLastRound) {
+        appendTransportSupplyLog('最后一轮完成：立即自动使用奖励…', 'info');
+        const useRes = await tryAutoUseTransportSupplyRewardOnce();
+        if (useRes.ok && useRes.used) {
+          transportSupplyPendingRewardUses = Math.max(0, transportSupplyPendingRewardUses - 1);
+          appendTransportSupplyLog(`最后一轮奖励已自动使用：${useRes.itemName}×1`, 'ok');
+        } else if (useRes.reason === 'not_found') {
+          appendTransportSupplyLog(`最后一轮未在背包找到「${TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD}」，请稍后手动确认`, 'err');
+        } else {
+          appendTransportSupplyLog(`最后一轮自动使用奖励失败：${useRes.error || '未知错误'}`, 'err');
+        }
+      } else {
+        appendTransportSupplyLog(`第 ${round} 轮奖励入队：下一轮等待阶段自动使用（待使用 ${transportSupplyPendingRewardUses}）`, 'info');
+      }
     }
 
     if (!transportSupplyStopRequested) {
-      appendTransportSupplyLog('流程结束（已达最大轮数或未触发提前停止）', 'info');
+      if (transportSupplyPendingRewardUses > 0) {
+        appendTransportSupplyLog(`流程结束：仍有 ${transportSupplyPendingRewardUses} 张奖励票未自动使用`, 'err');
+      } else {
+        appendTransportSupplyLog('流程结束（已达最大轮数或未触发提前停止）', 'info');
+      }
     }
   } finally {
     transportSupplyRunning = false;
     transportSupplyStopRequested = false;
+    transportSupplyPendingRewardUses = 0;
     if (transportSupplyWaiter) clearTransportSupplyWaiter(null);
     updateTransportSupplyButton();
   }
@@ -2217,6 +2678,10 @@ function toggleCollapseMode() {
   loadAutoUseRules();
   loadQuickLogins();
   loadBuyItems();
+  await loadLiaoguoPairs();
+  const liaoguoSel = document.getElementById('liaoguo-pair-select');
+  if (liaoguoSel) liaoguoSel.addEventListener('change', onLiaoguoPairSelectChange);
+  updateLiaoguoButton();
   await loadToolTeleportOptions();
   updateBattleStatsText();
 })();

@@ -39,6 +39,7 @@ TELEPORT_DESTINATIONS_FILE = os.path.join(SHARED_DATA_DIR, "teleport_destination
 
 QUICK_LOGINS_FILE = os.path.join(INSTANCE_DATA_DIR, "quick_logins.json")
 BUY_ITEMS_FILE = os.path.join(INSTANCE_DATA_DIR, "buy_items.json")
+LIAOGUO_PAIRS_FILE = os.path.join(INSTANCE_DATA_DIR, "liaoguo_pairs.json")
 AUTO_USE_RULES_FILE = os.path.join(INSTANCE_DATA_DIR, "auto_use_rules.json")
 ANNOTATIONS_FILE = os.path.join(INSTANCE_DATA_DIR, "annotations.json")
 PACKET_LOG_DIR = os.path.join(INSTANCE_DATA_DIR, "packet_logs")
