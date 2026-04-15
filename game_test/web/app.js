@@ -1312,7 +1312,7 @@ function parseGoldToCopperFromText(text) {
   if (mj) jin = Number(mj[1]);
   if (my) yin = Number(my[1]);
   if (mt) tong = Number(mt[1]);
-  if (mj || my || mt) return jin * 1000000 + yin * 1000 + tong;
+  if (mj || my || mt) return jin * 10000 + yin * 100 + tong;
   const mp = tail.match(/^(\d+)$/);
   if (mp) return Number(mp[1]);
   return null;
@@ -1320,10 +1320,10 @@ function parseGoldToCopperFromText(text) {
 
 function formatGoldFromCopper(copper) {
   const total = Math.max(0, Number(copper) || 0);
-  const jin = Math.floor(total / 1000000);
-  const rem1 = total % 1000000;
-  const yin = Math.floor(rem1 / 1000);
-  const tong = rem1 % 1000;
+  const jin = Math.floor(total / 10000);
+  const rem1 = total % 10000;
+  const yin = Math.floor(rem1 / 100);
+  const tong = rem1 % 100;
   return `${jin}金${yin}银${tong}铜`;
 }
 
