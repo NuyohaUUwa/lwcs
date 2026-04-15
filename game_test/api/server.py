@@ -20,7 +20,7 @@ from config import API_DEBUG, API_HOST, API_PORT, GAME_SERVERS, LOGIN_SERVERS
 from core.session import get_session
 from features.backpack import get_backpack_snapshot
 from features.battle import get_auto_use_rules, set_auto_use_rules
-from features.map_npc_parse import extract_map_npc_hit
+from features.map_npc_parse import extract_map_npc_list
 from features.packet_probe import annotate_packet, get_all_fingerprints, send_probe_packet, try_parse_packet
 from features.role_stats import STAT_GROUPS, STAT_NAMES
 from features.teleport import get_teleport_destinations
@@ -385,8 +385,25 @@ def api_map_npc_parse():
     hex_str = str(body.get("raw_hex", body.get("hex", ""))).replace(" ", "").lower()
     if not hex_str:
         return jsonify({"ok": False, "error": "raw_hex 不能为空"}), 400
-    hit = extract_map_npc_hit(hex_str)
-    return jsonify({"ok": True, "map_npc": hit})
+    lst = extract_map_npc_list(hex_str)
+    hit = lst[0] if lst else None
+    return jsonify({"ok": True, "map_npc": hit, "map_npc_list": lst})
+
+
+@app.route("/api/map-npc/current", methods=["POST"])
+def api_map_npc_current():
+    """将所选 8 位 hex 写入会话当前地图 NPC（购买/运输等后端逻辑使用）。"""
+    body = request.get_json(silent=True) or {}
+    id_hex = str(body.get("id_hex", "")).strip().lower()
+    utf8_text = str(body.get("utf8_text", "")).strip()
+    if len(id_hex) != 8:
+        return jsonify({"ok": False, "error": "id_hex 须为 8 位 hex"}), 400
+    try:
+        int(id_hex, 16)
+    except ValueError:
+        return jsonify({"ok": False, "error": "id_hex 非法"}), 400
+    get_session().set_current_map_npc(id_hex, utf8_text)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/events", methods=["GET"])

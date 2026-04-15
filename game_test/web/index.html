@@ -559,7 +559,12 @@
 
       <div class="battle-box">
         <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">地图NPC</div>
-        <div class="battle-row">  
+        <div class="battle-row">
+          <span class="text-muted">本包 NPC：</span>
+          <select id="map-npc-select" disabled style="min-width:200px; max-width:340px; padding:4px 8px; font-size:12px;"></select>
+          <button type="button" class="btn btn-primary btn-sm" onclick="confirmMapNpcSelection()">确认</button>
+        </div>
+        <div class="battle-row" style="margin-top:6px;">
           <span class="text-muted">当前地图NPC：</span>
           <span id="battle-map-npc-from-packet" class="mono text-sm">—</span>
         </div>

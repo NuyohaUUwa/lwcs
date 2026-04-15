@@ -28,7 +28,7 @@ let battleMonsters = [];
 let selectedMonsterCode = '';
 let battleLogMode = 'simple'; // simple | detail
 let autoUseRules = [];
-let controlState = { auto_reconnect_enabled: false, reconnect_state: 'idle', reconnect_attempts: 0, reconnect_max_attempts: 3, reconnect_last_error: '', reconnect_next_retry_in: null, reconnect_banned_wait_in: null };
+let controlState = { auto_reconnect_enabled: false, reconnect_state: 'idle', reconnect_attempts: 0, reconnect_max_attempts: 0, reconnect_last_error: '', reconnect_next_retry_in: null, reconnect_banned_wait_in: null };
 /** 与后端 config.DEFAULT_BATTLE_LOOP_DELAY_MS 同步，由 /api/status 的 default_battle_loop_delay_ms 写入 */
 let serverDefaultBattleLoopDelayMs = null;
 let battleState = { state: 'idle', in_progress: false, mode: 'idle', loop_running: false, current_monster: '', loop_monster_code: '', loop_delay_ms: 0, total_count: 0, total_exp: 0, total_gold_copper: 0 };
@@ -38,7 +38,8 @@ const TELEPORT_PACKET_TEMPLATE = '18000000e80303004428{random_num}f5054728000006
 const DAILY_CHECKIN_TEMPLATE = '20000000e80313007d2e08f4f505882e00000e0000000c00636865636b496e446f3f7b7d';
 /** 运输物资报文中的 NPC id 占位（8 hex），运行时替换为当前地图 NPC id */
 const TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER = '74010000';
-const TRANSPORT_SUPPLY_BUY_TEMPLATE = `27000000e8030d00fe031d3ff5051004000015000000${TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER}022c9d0900000000000000000001000000`;
+/** 运输物资购买的固定物资编码（14 位 hex） */
+const TRANSPORT_SUPPLY_BUY_ITEM_CODE = '022c9d09000000';
 const TRANSPORT_SUPPLY_DELIVER_TEMPLATE = `27000000e8030d00fe03cea8f5051004000015000000${TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER}02319d0900000000000000000000000000`;
 /** 下行完成指纹：用户描述为 e8030100e60，实际多为 e607 等，按前缀匹配 */
 const TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX = 'e8030100e60';
@@ -129,7 +130,13 @@ const RECONNECT_ROLE_STATS_TIMEOUT_MS = 5000;
 const RECONNECT_ROLE_STATS_POLL_MS = 250;
 /** 一键登录：整链失败（含选角后久无 d607/属性）时自动重试次数 */
 const QUICK_LOGIN_MAX_ATTEMPTS = 3;
-const QUICK_LOGIN_RETRY_GAP_MS = 800;
+const QUICK_LOGIN_RETRY_GAP_MS = 1600;
+/** 一键/自动登录链：各 HTTP 步骤之间的间隔（登录服 → 游戏服拉角 → 选角） */
+const LOGIN_FLOW_STEP_DELAY_MS = 750;
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function setControlState(data) {
   controlState = { ...controlState, ...(data || {}) };
@@ -167,7 +174,10 @@ function updateBattleState(data) {
 function getReconnectInfoText() {
   const state = String(controlState.reconnect_state || 'idle');
   if (state === 'running') {
-    return `后端重连中…(${Number(controlState.reconnect_attempts || 0)}/${Number(controlState.reconnect_max_attempts || 0)})`;
+    const n = Number(controlState.reconnect_attempts || 0);
+    const max = Number(controlState.reconnect_max_attempts || 0);
+    if (max > 0) return `后端重连中…(${n}/${max})`;
+    return `后端重连中…(第 ${n} 次)`;
   }
   if (state === 'scheduled') {
     const wait = Number(controlState.reconnect_next_retry_in || 0);
@@ -240,6 +250,13 @@ function updateStatus(data) {
   if (data.control_state) setControlState(data.control_state);
   if (data.battle_state) updateBattleState(data.battle_state);
 
+  if (!data.connected) {
+    backpackItemsCache = [];
+    selectedItemId = null;
+    const sc = document.getElementById('stats-content');
+    if (sc) sc.innerHTML = '<span class="text-muted">等待数据...</span>';
+  }
+
   if (isConnected) {
     // 加载角色属性（先拉取，可能为空；renderRoleStats 会铺完整骨架并用报文逐步填充）
     api('GET', '/api/role-stats').then(r => { if (r.ok) renderRoleStats(r); });
@@ -275,12 +292,14 @@ async function performLoginFlow(info) {
   });
   if (!loginRes.ok) return { ok: false, error: loginRes.error || '登录失败' };
 
+  await sleepMs(LOGIN_FLOW_STEP_DELAY_MS);
   // Step 2: 选区
   const rolesRes = await api('POST', '/api/roles', {
     server_ip: info.serverIp, server_port: info.serverPort
   });
   if (!rolesRes.ok) return { ok: false, error: rolesRes.error || '选区失败' };
 
+  await sleepMs(LOGIN_FLOW_STEP_DELAY_MS);
   // Step 3: 选角
   const enterRes = await api('POST', '/api/select-role', { role_id: info.roleId });
   if (!enterRes.ok) return { ok: false, error: enterRes.error || '选角失败' };
@@ -733,7 +752,14 @@ async function buyItem() {
   const input = document.getElementById('backpack-buy-code');
   const itemCode = input.value.trim().toLowerCase();
   if (!itemCode) { showMsg('backpack-msg', '请输入 14 位物品编码', 'err'); return; }
-  const res = await api('POST', '/api/item/buy', { item_code: itemCode });
+  let npcId = '';
+  try {
+    npcId = getCurrentBuyNpcId();
+  } catch (err) {
+    showMsg('backpack-msg', err?.message || '无法获取当前地图 NPC id', 'err');
+    return;
+  }
+  const res = await buyByNpcAndItemCode(npcId, itemCode);
   showMsg('backpack-msg', res.ok ? withValidationWarning('购买请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
 }
 
@@ -827,10 +853,59 @@ function updateMapNpcFromPacketUi() {
   el.textContent = `${name}${idHex}`;
 }
 
+function fillMapNpcSelect(list) {
+  const sel = document.getElementById('map-npc-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  if (!Array.isArray(list) || !list.length) {
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  list.forEach((row) => {
+    const idHex = String(row.id_hex || '').toLowerCase();
+    const label = (row.utf8_text || idHex) + ` (${idHex})`;
+    const opt = document.createElement('option');
+    opt.value = idHex;
+    opt.textContent = label;
+    opt.dataset.utf8 = String(row.utf8_text || '');
+    sel.appendChild(opt);
+  });
+  sel.selectedIndex = 0;
+}
+
+async function confirmMapNpcSelection() {
+  const sel = document.getElementById('map-npc-select');
+  if (!sel || sel.disabled || !sel.value) return;
+  const idHex = sel.value.trim().toLowerCase();
+  const opt = sel.selectedOptions[0];
+  const utf8Text = opt ? String(opt.dataset.utf8 || '') : '';
+  const res = await api('POST', '/api/map-npc/current', { id_hex: idHex, utf8_text: utf8Text });
+  if (!res.ok) {
+    showMsg('tool-send-result', res.error || '保存失败', 'err');
+    return;
+  }
+  currentMapNpcFromPacket = { idHex, utf8Text };
+  updateMapNpcFromPacketUi();
+  showMsg('tool-send-result', `已设为当前地图 NPC：${utf8Text ? `${utf8Text} · ` : ''}${idHex}`, 'ok');
+}
+
 function handleMapNpcListDnPacket(record) {
+  const list = record?.map_npc_list;
+  if (Array.isArray(list) && list.length) {
+    fillMapNpcSelect(list);
+    const first = list[0];
+    currentMapNpcFromPacket = {
+      idHex: String(first.id_hex || '').toLowerCase(),
+      utf8Text: String(first.utf8_text || ''),
+    };
+    updateMapNpcFromPacketUi();
+    return;
+  }
   const m = record?.map_npc;
   if (!m || !m.id_hex) return;
   currentMapNpcFromPacket = { idHex: String(m.id_hex), utf8Text: String(m.utf8_text || '') };
+  fillMapNpcSelect([{ id_hex: m.id_hex, utf8_text: m.utf8_text || '' }]);
   updateMapNpcFromPacketUi();
 }
 
@@ -838,6 +913,21 @@ function getTransportSupplyNpcIdHexForPacket() {
   const h = String(currentMapNpcFromPacket.idHex || '').trim().toLowerCase();
   if (h.length !== 8 || !/^[0-9a-f]{8}$/.test(h)) return '';
   return h;
+}
+
+function getCurrentBuyNpcId() {
+  const npcId = getTransportSupplyNpcIdHexForPacket();
+  if (!npcId) {
+    throw new Error('当前地图 NPC id 未知，请先触发地图 NPC 列表并确认当前 NPC');
+  }
+  return npcId;
+}
+
+async function buyByNpcAndItemCode(npcIdHex, itemCodeHex14) {
+  return api('POST', '/api/item/buy', {
+    npc_id: String(npcIdHex || '').trim().toLowerCase(),
+    item_code: String(itemCodeHex14 || '').trim().toLowerCase(),
+  });
 }
 
 function parseStarStoneRewards(record) {
@@ -876,7 +966,14 @@ async function runStarStoneCycle() {
     return;
   }
   starStoneAwaiting = 'buy';
-  const res = await api('POST', '/api/item/buy', { item_code: favorite.code });
+  let npcId = '';
+  try {
+    npcId = getCurrentBuyNpcId();
+  } catch (err) {
+    stopStarStoneLoop(err?.message || '当前地图 NPC id 未知，已停止', 'err');
+    return;
+  }
+  const res = await buyByNpcAndItemCode(npcId, favorite.code);
   if (!res.ok) {
     stopStarStoneLoop(res.error || '购买失败，已停止', 'err');
     return;
@@ -1797,11 +1894,8 @@ async function runTransportSupplyFlow() {
         break;
       }
 
-      const buyHex = TRANSPORT_SUPPLY_BUY_TEMPLATE
-        .replace(TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER, npcId)
-        .replace('1d3f', randomNumHex4());
       appendTransportSupplyLog(`第 ${round} 轮：发送购买物资（NPC ${npcId}）…`, 'info');
-      const buyRes = await sendProbeHexQuiet(buyHex);
+      const buyRes = await buyByNpcAndItemCode(npcId, TRANSPORT_SUPPLY_BUY_ITEM_CODE);
       if (!buyRes.ok) {
         appendTransportSupplyLog(`购买发送失败：${buyRes.error || '未知错误'}`, 'err');
         setToolResult(`运输物资：购买失败 — ${buyRes.error || '未知错误'}`, 'err');

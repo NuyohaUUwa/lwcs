@@ -120,7 +120,8 @@ class GameSession:
         self.reconnect_state: str = "idle"
         self.reconnect_reason: str = ""
         self.reconnect_attempts: int = 0
-        self.reconnect_max_attempts: int = 3
+        # 0 表示不限制次数（自动重连持续重试）；仅用于前端展示，后端已不再据此停止
+        self.reconnect_max_attempts: int = 0
         self.reconnect_last_error: str = ""
         self.reconnect_next_retry_ts: float = 0.0
         self.reconnect_banned_until_ts: float = 0.0
@@ -137,7 +138,8 @@ class GameSession:
 
         # ---- 发送运行时 ----
         self.send_queue: queue.PriorityQueue = queue.PriorityQueue()
-        self._send_lock = threading.Lock()
+        # 可重入：send_and_receive_once 等会在持锁时再次调用 send_packet
+        self._send_lock = threading.RLock()
 
     # ------------------------------------------------------------------ #
     #  背包操作                                                            #

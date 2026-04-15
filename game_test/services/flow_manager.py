@@ -10,7 +10,13 @@ from typing import Callable, Dict
 
 from config import GAME_SERVERS, LOGIN_SERVERS, RECV_BUFSIZE
 from core.codec import split_game_frame_bytes
-from core.connector import connect_and_exchange, open_connection, start_connection_runtime, stop_connection_runtime
+from core.connector import (
+    connect_and_exchange,
+    open_connection,
+    open_connection_and_send_receive_once,
+    start_connection_runtime,
+    stop_connection_runtime,
+)
 from core.session import RoleInfo, get_session
 from features.backpack import dispatch_backpack_packet
 from features.battle import (
@@ -42,6 +48,8 @@ from features.roles import (
 )
 
 _CONTROL_LOOP_SLEEP_S = 0.2
+# 自动重连：登录 → 拉角色 → 选角 之间的间隔（秒），减轻服务端与会话竞态
+_RECONNECT_STEP_DELAY_S = 0.9
 _BANNED_ROLE_HEX_TOKEN = "e8afa5e8a792e889b2e5b7b2e8a2abe7a681e5b081"
 _BANNED_ROLE_TEXT = "该角色已被禁封"
 
@@ -107,6 +115,8 @@ def set_auto_reconnect_enabled(enabled: bool) -> dict:
     session = get_session()
     with session._lock:
         session.auto_reconnect_enabled = bool(enabled)
+        if enabled:
+            session.reconnect_max_attempts = 0
     session.notify_control_state()
     session.notify_status_change()
     return {"ok": True, "control_state": session.get_control_state()}
@@ -144,7 +154,7 @@ def _schedule_reconnect(reason: str, *, immediate: bool = False, delay_s: float 
             return True
         attempts = session.reconnect_attempts
         if delay_s is None:
-            delay_s = 0.0 if immediate else min(3 * max(1, attempts + 1), 30)
+            delay_s = 0.0 if immediate else min(8.0 * max(1, attempts + 1), 120.0)
         next_retry_ts = time.time() + max(0.0, delay_s)
         session.reconnect_state = "scheduled"
         session.reconnect_reason = reason
@@ -161,12 +171,48 @@ def _should_keep_reconnecting(session) -> bool:
     return bool(session.auto_reconnect_enabled)
 
 
-def _get_retry_delay_s(attempts: int) -> float:
-    if attempts <= 1:
-        return 0.0
-    if attempts == 2:
-        return 1.0
-    return 2.0
+def _get_retry_delay_s(failed_attempts: int) -> float:
+    """单次重连失败后，下次尝试前的等待（failed_attempts 为当前已累计的失败次数）。"""
+    n = max(1, int(failed_attempts))
+    if n <= 1:
+        return 10.0
+    if n == 2:
+        return 18.0
+    if n == 3:
+        return 30.0
+    if n == 4:
+        return 45.0
+    return min(60.0 + (n - 5) * 25.0, 300.0)
+
+
+def _clear_login_state_after_reconnect_failure() -> None:
+    """
+    重连失败后清空登录产物（session、背包、角色展示等），保留账号/区服/角色ID/循环战斗意图供下次重试。
+    """
+    session = get_session()
+    with session._lock:
+        preserve_loop = bool(session.battle_loop_running)
+    reset_battle_state(preserve_loop=preserve_loop)
+    session.stop_runtime()
+    stop_connection_runtime()
+    with session._lock:
+        session.connected = False
+        session.connection_status = "disconnected"
+        session.session_id = None
+        session.announcement = ""
+        session.server_list = []
+        session.available_roles = []
+        session.current_role = None
+        session.backpack_items = {}
+        session.role_stats = {}
+        session.role_stats_full_refresh_on_next_ed07 = False
+        session.current_map_npc_id_hex = ""
+        session.current_map_npc_utf8_text = ""
+        session.last_recv_ts = 0.0
+        session.recv_framing_buffer = b""
+    session.notify_status_change()
+    session.notify_backpack_update()
+    session.notify_battle_state()
 
 
 def _schedule_banned_reconnect(reason: str, *, delay_s: float):
@@ -208,8 +254,10 @@ def _perform_backend_reconnect():
 
     flow_res = login_flow(account, password, login_server)
     if flow_res.get("ok"):
+        time.sleep(_RECONNECT_STEP_DELAY_S)
         flow_res = fetch_roles_flow(server_ip=server_ip, server_port=server_port, server_name=server_name)
     if flow_res.get("ok"):
+        time.sleep(_RECONNECT_STEP_DELAY_S)
         flow_res = select_role_flow(role_id)
 
     if flow_res.get("ok"):
@@ -228,18 +276,12 @@ def _perform_backend_reconnect():
         return
 
     error = str(flow_res.get("error") or "未知错误")
+    _clear_login_state_after_reconnect_failure()
     with session._lock:
         attempts = session.reconnect_attempts
-        max_attempts = session.reconnect_max_attempts
-        loop_running = session.battle_loop_running
-    if attempts >= max_attempts:
-        _update_reconnect_state("failed", last_error=error, next_retry_ts=0.0)
-        _emit_control_log(f"自动重连失败，已达到最大重试次数：{error}", level="warn", scope="reconnect")
-        return
-
-    delay_s = _get_retry_delay_s(attempts + 1)
+    delay_s = _get_retry_delay_s(attempts)
     _update_reconnect_state("scheduled", last_error=error, next_retry_ts=time.time() + delay_s)
-    _emit_control_log(f"自动重连失败：{error}；{delay_s:.1f} 秒后重试", level="warn", scope="reconnect")
+    _emit_control_log(f"自动重连失败：{error}；{delay_s:.1f} 秒后重试（将持续重试）", level="warn", scope="reconnect")
 
 
 def _control_worker_tick(now: float) -> None:
@@ -496,10 +538,14 @@ def fetch_roles_flow(server_ip: str = "", server_port: int = 0, server_name: str
     try:
         ensure_control_worker_running()
         packet_hex = build_role_list_packet(session.session_id, server_ip, int(server_port))
-        open_connection(server_ip, int(server_port), timeout=15)
-        from core.connector import send_and_receive_once
-
-        response = send_and_receive_once(packet_hex, recv_timeout=5, bufsize=10240)
+        response = open_connection_and_send_receive_once(
+            server_ip,
+            int(server_port),
+            packet_hex,
+            connect_timeout=15,
+            recv_timeout=5,
+            bufsize=10240,
+        )
         if not response:
             return {"ok": False, "error": "游戏服未返回角色列表"}
         response_str = response.decode("utf-8", errors="ignore")

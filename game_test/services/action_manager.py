@@ -189,15 +189,18 @@ def dispatch_feature_action(action_name: str, payload: Dict[str, Any]) -> dict:
         return send_raw_action(item_use.build_exchange_wuling_packet(), priority=10, use_queue=True)
 
     if action_name == "item.buy":
+        npc_id = str(payload.get("npc_id", "")).strip().lower()
         item_code = str(payload.get("item_code", "")).strip().lower()
         try:
-            packet_hex = item_use.build_buy_item_packet(item_code)
+            if not npc_id:
+                npc_id = item_use.get_current_map_npc_id()
+            packet_hex = item_use.build_buy_item_packet(npc_id, item_code)
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         res = send_raw_action(packet_hex, priority=10, use_queue=True)
         if not res.get("ok"):
             return res
-        result = {"ok": True, "queued": 1, "item_code": item_code}
+        result = {"ok": True, "queued": 1, "npc_id": npc_id, "item_code": item_code}
         if res.get("validation_warning"):
             result["validation_warning"] = res["validation_warning"]
         return result

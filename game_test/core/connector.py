@@ -40,23 +40,76 @@ def _send_all(sock: socket.socket, data: bytes) -> int:
 def open_connection(ip: str, port: int, timeout: float = 15.0) -> socket.socket:
     """建立 TCP 连接并写入 session。"""
     session = get_session()
-    close_connection()
-    try:
+    with session._send_lock:
+        _detach_socket(session)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((ip, port))
+            session.sock = sock
+            session.server_ip = ip
+            session.server_port = port
+            session.recv_framing_buffer = b""
+            return sock
+        except Exception as e:
+            raise ConnectionError(f"连接 {ip}:{port} 失败: {e}") from e
+
+
+def open_connection_and_send_receive_once(
+    ip: str,
+    port: int,
+    packet_hex: str,
+    *,
+    connect_timeout: float = 15.0,
+    recv_timeout: float = 5.0,
+    bufsize: int = RECV_BUFSIZE,
+) -> bytes:
+    """
+    在同一把 _send_lock 下完成：换线、建连、发一帧、收一帧并拼包。
+    避免「open 释放锁后另一线程 close/open」导致 send 与 recv 落在不同/已关闭套接字上，
+    在 Windows 上会表现为 WinError 10038 (WSAENOTSOCK)。
+    """
+    session = get_session()
+    clean_hex = str(packet_hex or "").lower().replace(" ", "")
+    with session._send_lock:
+        _detach_socket(session)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((ip, port))
+        sock.settimeout(connect_timeout)
+        try:
+            sock.connect((ip, int(port)))
+        except Exception as e:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            raise ConnectionError(f"连接 {ip}:{port} 失败: {e}") from e
         session.sock = sock
         session.server_ip = ip
-        session.server_port = port
+        session.server_port = int(port)
         session.recv_framing_buffer = b""
-        return sock
-    except Exception as e:
-        raise ConnectionError(f"连接 {ip}:{port} 失败: {e}") from e
+        old_timeout = sock.gettimeout()
+        try:
+            sock.settimeout(recv_timeout)
+            data = binascii.unhexlify(clean_hex)
+            sent_bytes = _send_all(sock, data)
+            if sent_bytes > 0:
+                record_packet(data, "UP")
+            chunk = sock.recv(bufsize) or b""
+            combined = session.recv_framing_buffer + chunk
+            frames, rest = split_game_frame_bytes(combined)
+            session.recv_framing_buffer = rest
+            for frame in frames:
+                record_packet(frame, "DN")
+            return b"".join(frames)
+        finally:
+            try:
+                sock.settimeout(old_timeout)
+            except Exception:
+                pass
 
 
-def close_connection():
-    """关闭当前连接。"""
-    session = get_session()
+def _detach_socket(session) -> None:
+    """在已持有 session._send_lock 时关闭并清空 sock；勿单独对外调用。"""
     sock = session.sock
     session.sock = None
     if sock:
@@ -64,6 +117,13 @@ def close_connection():
             sock.close()
         except Exception:
             pass
+
+
+def close_connection():
+    """关闭当前连接。"""
+    session = get_session()
+    with session._send_lock:
+        _detach_socket(session)
 
 
 def send_packet(hex_str: str, priority: int = 10, use_queue: bool = True) -> int:
@@ -92,21 +152,25 @@ def send_and_receive_once(
     bufsize: int = RECV_BUFSIZE,
 ) -> bytes:
     """在当前连接上发送一次并同步接收一次响应。"""
-    sock = _get_connected_socket()
     session = get_session()
-    old_timeout = sock.gettimeout()
-    try:
-        sock.settimeout(recv_timeout)
-        send_packet(packet_hex, use_queue=False)
-        chunk = sock.recv(bufsize) or b""
-        combined = session.recv_framing_buffer + chunk
-        frames, rest = split_game_frame_bytes(combined)
-        session.recv_framing_buffer = rest
-        for frame in frames:
-            record_packet(frame, "DN")
-        return b"".join(frames)
-    finally:
-        sock.settimeout(old_timeout)
+    with session._send_lock:
+        sock = _get_connected_socket()
+        old_timeout = sock.gettimeout()
+        try:
+            sock.settimeout(recv_timeout)
+            send_packet(packet_hex, use_queue=False)
+            chunk = sock.recv(bufsize) or b""
+            combined = session.recv_framing_buffer + chunk
+            frames, rest = split_game_frame_bytes(combined)
+            session.recv_framing_buffer = rest
+            for frame in frames:
+                record_packet(frame, "DN")
+            return b"".join(frames)
+        finally:
+            try:
+                sock.settimeout(old_timeout)
+            except Exception:
+                pass
 
 
 def connect_and_exchange(
@@ -124,30 +188,52 @@ def connect_and_exchange(
     keep_open=True 时连接保留给后续流程；否则自动关闭。
     返回值仅为拼帧后的完整报文字节串拼接，不含 TCP 半包；半包写入 recv_framing_buffer（仅 keep_open 时保留）。
     """
-    sock = open_connection(ip, port, timeout=connect_timeout)
     session = get_session()
-    try:
-        old_timeout = sock.gettimeout()
-        sock.settimeout(recv_timeout)
-        send_packet(packet_hex, use_queue=False)
-        chunk = sock.recv(bufsize) or b""
-        combined = session.recv_framing_buffer + chunk
-        frames, rest = split_game_frame_bytes(combined)
-        if keep_open:
-            session.recv_framing_buffer = rest
-        else:
-            session.recv_framing_buffer = b""
-        for frame in frames:
-            record_packet(frame, "DN")
-        response = b"".join(frames)
-        sock.settimeout(old_timeout)
-        if not keep_open:
-            close_connection()
-        return response
-    except Exception:
-        if not keep_open:
-            close_connection()
-        raise
+    clean_hex = str(packet_hex or "").lower().replace(" ", "")
+    with session._send_lock:
+        _detach_socket(session)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(connect_timeout)
+        try:
+            sock.connect((ip, int(port)))
+        except Exception as e:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            raise ConnectionError(f"连接 {ip}:{port} 失败: {e}") from e
+        session.sock = sock
+        session.server_ip = ip
+        session.server_port = int(port)
+        session.recv_framing_buffer = b""
+        try:
+            old_timeout = sock.gettimeout()
+            sock.settimeout(recv_timeout)
+            data = binascii.unhexlify(clean_hex)
+            sent_bytes = _send_all(sock, data)
+            if sent_bytes > 0:
+                record_packet(data, "UP")
+            chunk = sock.recv(bufsize) or b""
+            combined = session.recv_framing_buffer + chunk
+            frames, rest = split_game_frame_bytes(combined)
+            if keep_open:
+                session.recv_framing_buffer = rest
+            else:
+                session.recv_framing_buffer = b""
+            for frame in frames:
+                record_packet(frame, "DN")
+            response = b"".join(frames)
+            try:
+                sock.settimeout(old_timeout)
+            except Exception:
+                pass
+            if not keep_open:
+                _detach_socket(session)
+            return response
+        except Exception:
+            if not keep_open:
+                _detach_socket(session)
+            raise
 
 
 def start_connection_runtime(

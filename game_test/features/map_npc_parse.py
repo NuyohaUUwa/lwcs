@@ -4,7 +4,8 @@
 规则与前端旧实现一致：
 - 首段可为 [id:4][uint16=0][len:2 LE][UTF-8]（字节偏移 18）
 - 后续为 [id:4][len:2 LE][UTF-8]，记录间有填充，在窗口内重扫对齐
-- 跳过 UTF-8 标量数 > 5 的段，取第 1 个未跳过段的 4 字节 id（小写 hex）及文本
+- 链上对齐仅接受正文含 CJK 的 TLV，避免误把二进制碎片当成「短 UTF-8」
+- 列表项：≤5 字且含 CJK；默认「当前」取第 1 个
 """
 
 from __future__ import annotations
@@ -61,8 +62,8 @@ def _looks_like_plain_record(u8: bytes, j: int) -> bool:
         return False
     if "\ufffd" in text:
         return False
-    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
-    return cjk >= 1 or len(text) <= 6
+    # 必须与中文 NPC/地名一致；禁止仅用「≤6 字符」放行，否则会误对齐到二进制碎片（如 len=2 的 "{\x03"）
+    return bool(re.search(r"[\u4e00-\u9fff]", text))
 
 
 def _find_next_plain_start(u8: bytes, start: int) -> Optional[int]:
@@ -109,29 +110,45 @@ def collect_map_npc_segments(u8: bytes) -> List[Tuple[bytes, str]]:
     return segments
 
 
-def extract_map_npc_hit(raw_hex: str) -> Optional[Dict[str, str]]:
-    """
-    从整包 hex 解析「当前地图 NPC」：在所有 TLV 段中跳过文本长度 >5 的段，
-    """
+def _is_short_map_npc_label(utf8_text: str) -> bool:
+    """短名列表：≤5 字且含 CJK（与游戏内 NPC/传送点名一致）。"""
+    if len(utf8_text) > 5:
+        return False
+    if not re.search(r"[\u4e00-\u9fff]", utf8_text):
+        return False
+    for ch in utf8_text:
+        if ord(ch) < 32 and ch not in "\t\n\r":
+            return False
+    return True
+
+
+def extract_map_npc_list(raw_hex: str) -> List[Dict[str, str]]:
+    """所有「短名」TLV 段（≤5 字且为中文标签），顺序与包内一致。"""
     u8 = bytes_from_hex(raw_hex)
     if not u8 or len(u8) < 24:
-        return None
+        return []
     try:
         segments = collect_map_npc_segments(u8)
     except (UnicodeDecodeError, IndexError, ValueError):
-        return None
+        return []
+    out: List[Dict[str, str]] = []
     for id_b, utf8_text in segments:
-        if len(utf8_text) > 5:
+        if not _is_short_map_npc_label(utf8_text):
             continue
-        return {"id_hex": _id_to_hex(id_b), "utf8_text": utf8_text}
-    return None
+        out.append({"id_hex": _id_to_hex(id_b), "utf8_text": utf8_text})
+    return out
 
 
-def compute_map_npc_for_packet(direction: str, fingerprint: str, raw_hex: str) -> Optional[Dict[str, str]]:
-    """供 record_packet 写入 SSE / 日志：仅命中地图 NPC 类下行时返回字段，否则 None。"""
+def extract_map_npc_hit(raw_hex: str) -> Optional[Dict[str, str]]:
+    """兼容：等价于列表首项。"""
+    lst = extract_map_npc_list(raw_hex)
+    return lst[0] if lst else None
+
+
+def compute_map_npc_list_for_packet(direction: str, fingerprint: str, raw_hex: str) -> List[Dict[str, str]]:
     if not is_map_npc_list_packet(direction=direction, fingerprint=fingerprint, raw_hex=raw_hex):
-        return None
-    return extract_map_npc_hit(raw_hex)
+        return []
+    return extract_map_npc_list(raw_hex)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -144,11 +161,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not raw:
         print("用法: python map_npc_parse.py <hex字符串>  或 管道 stdin 传入 hex", file=sys.stderr)
         return 2
-    hit = extract_map_npc_hit(raw)
-    if not hit:
+    lst = extract_map_npc_list(raw)
+    if not lst:
         print("null")
         return 1
-    print(hit["utf8_text"], hit["id_hex"], sep="\t")
+    for row in lst:
+        print(row["utf8_text"], row["id_hex"], sep="\t")
     return 0
 
 
