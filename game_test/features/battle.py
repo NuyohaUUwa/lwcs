@@ -304,7 +304,7 @@ def _decode_utf8_text(packet_hex: str) -> str:
 def _parse_gold_to_copper(text: str):
     """
     将「获得金币」后的片段解析为总铜数。
-    金:银:铜 = 1,000,000 铜 : 1,000 铜 : 1 铜。
+    金:银:铜 = 10,000 铜 : 100 铜 : 1 铜。
     注意：不能用「金 in text」判断单位，否则「金币」会误判为带「金」单位。
     """
     m = re.search(r"(?:获得)?金币\s*[：:]\s*([^\r\n]+)", text)
@@ -325,7 +325,7 @@ def _parse_gold_to_copper(text: str):
     if mt:
         tong = int(mt.group(1))
     if mj or my or mt:
-        return jin * 1000 * 1000 + yin * 1000 + tong
+        return jin * 10000 + yin * 100 + tong
 
     mp = re.fullmatch(r"(\d+)", tail)
     if mp:
