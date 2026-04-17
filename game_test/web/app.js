@@ -21,6 +21,13 @@ let starStoneLoopCount = 0;
 let starStoneTotalStone = 0;
 let starStoneTotalFragment = 0;
 let starStoneTimer = null;
+const STAR_STONE_PHASE = Object.freeze({
+  IDLE: 'idle',
+  BUY: 'buy',
+  DECOMPOSE: 'decompose',
+});
+const STAR_STONE_LOOP_INTERVAL_MS = 1000;
+const STAR_STONE_TARGET_NAME_RE = /特步(?:鞋|靴)/;
 let transportSupplyRunning = false;
 let transportSupplyStopRequested = false;
 let transportSupplyWaiter = null;
@@ -54,6 +61,7 @@ const TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX = 'e8030100e60';
 const TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD = '通用10000储备金票';
 const TRANSPORT_SUPPLY_MAX_ROUNDS = 10;
 const TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS = 180000;
+const TRANSPORT_SUPPLY_DELIVER_RETRY_INTERVAL_MS = 5000;
 /** 当前地图 NPC：由后端 Python 解析后随 SSE packet.map_npc 下发 */
 let currentMapNpcFromPacket = { idHex: '', utf8Text: '' };
 
@@ -838,6 +846,17 @@ function clearStarStoneTimer() {
   }
 }
 
+function scheduleNextStarStoneCycle() {
+  clearStarStoneTimer();
+  starStoneTimer = setTimeout(runStarStoneCycle, STAR_STONE_LOOP_INTERVAL_MS);
+}
+
+function resetStarStoneLoopProgress() {
+  starStoneLoopCount = 0;
+  starStoneTotalStone = 0;
+  starStoneTotalFragment = 0;
+}
+
 function decodePacketText(rawHex) {
   try {
     return bytesFromHex(rawHex).decodeText;
@@ -957,16 +976,16 @@ function parseStarStoneRewards(record) {
 }
 
 function findStarStoneBuyFavorite() {
-  return buyItemFavorites.find((x) => /特步鞋/.test(x.name || ''));
+  return buyItemFavorites.find((x) => STAR_STONE_TARGET_NAME_RE.test(x.name || ''));
 }
 
 function findStarStoneDecomposeItem() {
-  return backpackItemsCache.find((x) => /特步鞋/.test(x.name || ''));
+  return backpackItemsCache.find((x) => STAR_STONE_TARGET_NAME_RE.test(x.name || ''));
 }
 
 function stopStarStoneLoop(reason = '', msgType = 'info') {
   starStoneLoopRunning = false;
-  starStoneAwaiting = 'idle';
+  starStoneAwaiting = STAR_STONE_PHASE.IDLE;
   clearStarStoneTimer();
   updateStarStoneButton();
   if (reason) {
@@ -982,7 +1001,7 @@ async function runStarStoneCycle() {
     stopStarStoneLoop('未找到常用购买物品“特步鞋”，请先在购买物品管理中保存', 'err');
     return;
   }
-  starStoneAwaiting = 'buy';
+  starStoneAwaiting = STAR_STONE_PHASE.BUY;
   let npcId = '';
   try {
     npcId = getCurrentBuyNpcId();
@@ -1001,21 +1020,13 @@ async function runStarStoneCycle() {
 async function startStarStoneLoop() {
   if (starStoneLoopRunning) return;
   starStoneLoopRunning = true;
-  starStoneAwaiting = 'idle';
-  starStoneLoopCount = 0;
-  starStoneTotalStone = 0;
-  starStoneTotalFragment = 0;
+  starStoneAwaiting = STAR_STONE_PHASE.IDLE;
+  resetStarStoneLoopProgress();
   clearStarStoneTimer();
   document.getElementById('star-stone-log').innerHTML = '';
   updateStarStoneButton();
-  appendStarStoneLog('开始执行获取升星石：先传送上京', 'info');
-  const tpRes = await api('POST', '/api/teleport', { destination: '上京' });
-  if (!tpRes.ok) {
-    stopStarStoneLoop(tpRes.error || '传送上京失败，已停止', 'err');
-    return;
-  }
-  appendStarStoneLog('已发送传送上京', 'ok');
-  starStoneTimer = setTimeout(runStarStoneCycle, 1000);
+  appendStarStoneLog('开始执行获取升星石：直接进入循环', 'info');
+  scheduleNextStarStoneCycle();
 }
 
 function toggleStarStoneLoop() {
@@ -1028,7 +1039,6 @@ function toggleStarStoneLoop() {
 
 async function handleStarStonePacket(record) {
   if (!starStoneLoopRunning || record?.direction !== 'DN') return;
-  const fingerprint = record.fingerprint || '';
   const text = decodePacketText(record.raw_hex || '');
 
   if (text.includes('包裹已满')) {
@@ -1036,12 +1046,12 @@ async function handleStarStonePacket(record) {
     return;
   }
 
-  if (starStoneAwaiting === 'buy' && fingerprint.includes('e607')) {
+  if (starStoneAwaiting === STAR_STONE_PHASE.BUY && text.includes('购买成功')) {
     await handleStarStoneBackpackUpdate();
     return;
   }
 
-  if (starStoneAwaiting === 'decompose') {
+  if (starStoneAwaiting === STAR_STONE_PHASE.DECOMPOSE) {
     const rewards = parseStarStoneRewards(record);
     if (!rewards) return;
     starStoneLoopCount += 1;
@@ -1051,9 +1061,8 @@ async function handleStarStonePacket(record) {
       `第${starStoneLoopCount}轮：获得升星石 ${rewards.stone}，获得宝石碎片 ${rewards.fragment}；累计 升星石 ${starStoneTotalStone} / 宝石碎片 ${starStoneTotalFragment}`,
       'ok'
     );
-    starStoneAwaiting = 'idle';
-    clearStarStoneTimer();
-    starStoneTimer = setTimeout(runStarStoneCycle, 1000);
+    starStoneAwaiting = STAR_STONE_PHASE.IDLE;
+    scheduleNextStarStoneCycle();
   }
 }
 
@@ -1438,10 +1447,10 @@ function sortPacketsNewestFirst(records) {
 }
 
 async function handleStarStoneBackpackUpdate() {
-  if (!starStoneLoopRunning || starStoneAwaiting !== 'buy') return;
+  if (!starStoneLoopRunning || starStoneAwaiting !== STAR_STONE_PHASE.BUY) return;
   const item = findStarStoneDecomposeItem();
   if (!item) return;
-  starStoneAwaiting = 'decompose';
+  starStoneAwaiting = STAR_STONE_PHASE.DECOMPOSE;
   const res = await api('POST', '/api/item/decompose', { item_id: item.item_id });
   if (!res.ok) {
     stopStarStoneLoop(res.error || '分解失败，已停止', 'err');
@@ -2302,6 +2311,51 @@ async function sendProbeHexQuiet(hex) {
   return api('POST', '/api/probe/send', { hex: cleanHex, use_queue: true });
 }
 
+async function waitTransportSupplyCompletionWithRetry(deliverHex, isStopped, round, npcId) {
+  const waitPromise = waitForTransportSupplyPacket(
+    (rec) => isTransportSupplyCompletionPacket(rec),
+    TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS
+  );
+  const firstSendRes = await sendProbeHexQuiet(deliverHex);
+  if (!firstSendRes.ok) {
+    clearTransportSupplyWaiter(null);
+    return { ok: false, reason: 'send_failed', error: firstSendRes.error || '未知错误' };
+  }
+
+  const deadlineTs = Date.now() + TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS;
+  while (true) {
+    const remainMs = Math.max(0, deadlineTs - Date.now());
+    const stepMs = Math.min(TRANSPORT_SUPPLY_DELIVER_RETRY_INTERVAL_MS, remainMs);
+    if (stepMs <= 0) break;
+
+    const raceRes = await Promise.race([
+      waitPromise.then((record) => ({ type: 'done', record })),
+      sleepInterruptible(stepMs, isStopped).then((ok) => ({ type: 'tick', ok })),
+    ]);
+    if (raceRes.type === 'done') {
+      return { ok: !!raceRes.record, record: raceRes.record || null, reason: raceRes.record ? '' : 'timeout' };
+    }
+    if (!raceRes.ok || isStopped()) {
+      clearTransportSupplyWaiter(null);
+      return { ok: false, reason: 'stopped' };
+    }
+
+    appendTransportSupplyLog(
+      `第 ${round} 轮：未收到完成下行，5 秒后重发交付（NPC ${npcId}）…`,
+      'info'
+    );
+    const retryRes = await sendProbeHexQuiet(deliverHex);
+    if (!retryRes.ok) {
+      clearTransportSupplyWaiter(null);
+      return { ok: false, reason: 'send_failed', error: retryRes.error || '未知错误' };
+    }
+  }
+
+  clearTransportSupplyWaiter(null);
+  const finalRec = await waitPromise;
+  return { ok: !!finalRec, record: finalRec || null, reason: finalRec ? '' : 'timeout' };
+}
+
 function toggleTransportSupplyFlow() {
   if (transportSupplyRunning) {
     transportSupplyStopRequested = true;
@@ -2344,8 +2398,8 @@ async function runTransportSupplyFlow() {
       await sleepInterruptible(800, isStopped);
       if (isStopped()) break;
 
-      appendTransportSupplyLog('等待 60 秒后交付物资…（期间自动使用上一轮奖励）', 'info');
-      const waited = await waitTransportSupplyWithRewardAutoUse(60000, isStopped, round);
+      appendTransportSupplyLog('等待 65 秒后交付物资…（期间自动使用上一轮奖励）', 'info');
+      const waited = await waitTransportSupplyWithRewardAutoUse(65000, isStopped, round);
       if (!waited || isStopped()) {
         appendTransportSupplyLog('已停止（等待交付阶段中断）', 'info');
         break;
@@ -2355,23 +2409,17 @@ async function runTransportSupplyFlow() {
         .replace(TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER, npcId)
         .replace('cea8', randomNumHex4());
       appendTransportSupplyLog(`发送交付物资（NPC ${npcId}）…`, 'info');
-      const waitPromise = waitForTransportSupplyPacket(
-        (rec) => isTransportSupplyCompletionPacket(rec),
-        TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS
-      );
-      const delRes = await sendProbeHexQuiet(deliverHex);
-      if (!delRes.ok) {
-        clearTransportSupplyWaiter(null);
-        appendTransportSupplyLog(`交付发送失败：${delRes.error || '未知错误'}`, 'err');
-        setToolResult(`运输物资：交付失败 — ${delRes.error || '未知错误'}`, 'err');
-        break;
-      }
-
-      const doneRec = await waitPromise;
+      const deliverWaitRes = await waitTransportSupplyCompletionWithRetry(deliverHex, isStopped, round, npcId);
       if (isStopped()) {
         appendTransportSupplyLog('已停止', 'info');
         break;
       }
+      if (!deliverWaitRes.ok && deliverWaitRes.reason === 'send_failed') {
+        appendTransportSupplyLog(`交付发送失败：${deliverWaitRes.error || '未知错误'}`, 'err');
+        setToolResult(`运输物资：交付失败 — ${deliverWaitRes.error || '未知错误'}`, 'err');
+        break;
+      }
+      const doneRec = deliverWaitRes.record || null;
       if (!doneRec) {
         appendTransportSupplyLog(
           `第 ${round} 轮：等待完成响应超时（${TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS / 1000}s 内未收到含 ${TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX} 的下行指纹）`,

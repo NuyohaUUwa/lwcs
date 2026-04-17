@@ -49,7 +49,7 @@ from features.roles import (
 
 _CONTROL_LOOP_SLEEP_S = 0.2
 # 自动重连：登录 → 拉角色 → 选角 之间的间隔（秒），减轻服务端与会话竞态
-_RECONNECT_STEP_DELAY_S = 0.9
+_RECONNECT_STEP_DELAY_S = 1.5
 _BANNED_ROLE_HEX_TOKEN = "e8afa5e8a792e889b2e5b7b2e8a2abe7a681e5b081"
 _BANNED_ROLE_TEXT = "该角色已被禁封"
 
@@ -154,7 +154,7 @@ def _schedule_reconnect(reason: str, *, immediate: bool = False, delay_s: float 
             return True
         attempts = session.reconnect_attempts
         if delay_s is None:
-            delay_s = 0.0 if immediate else min(8.0 * max(1, attempts + 1), 120.0)
+            delay_s = 0.0 if immediate else min(8.0 * max(1, attempts + 1), 60.0)
         next_retry_ts = time.time() + max(0.0, delay_s)
         session.reconnect_state = "scheduled"
         session.reconnect_reason = reason
@@ -182,7 +182,7 @@ def _get_retry_delay_s(failed_attempts: int) -> float:
         return 30.0
     if n == 4:
         return 45.0
-    return min(60.0 + (n - 5) * 25.0, 300.0)
+    return 60.0
 
 
 def _clear_login_state_after_reconnect_failure() -> None:
