@@ -158,6 +158,8 @@ const QUICK_LOGIN_MAX_ATTEMPTS = 3;
 const QUICK_LOGIN_RETRY_GAP_MS = 1600;
 /** 一键/自动登录链：各 HTTP 步骤之间的间隔（登录服 → 游戏服拉角 → 选角） */
 const LOGIN_FLOW_STEP_DELAY_MS = 750;
+/** 一键登录：仅 select-role 失败时的额外重试次数（总尝试=1+该值） */
+const SELECT_ROLE_RETRY_TIMES = 2;
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -326,9 +328,18 @@ async function performLoginFlow(info) {
 
   await sleepMs(LOGIN_FLOW_STEP_DELAY_MS);
   // Step 3: 选角
-  const enterRes = await api('POST', '/api/select-role', { role_id: info.roleId });
-  if (!enterRes.ok) return { ok: false, error: enterRes.error || '选角失败' };
-  return { ok: true, role: enterRes.role || null };
+  let lastEnterRes = null;
+  for (let attempt = 1; attempt <= SELECT_ROLE_RETRY_TIMES + 1; attempt++) {
+    const enterRes = await api('POST', '/api/select-role', { role_id: info.roleId }).catch(() => null);
+    lastEnterRes = enterRes;
+    if (enterRes?.ok) {
+      return { ok: true, role: enterRes.role || null };
+    }
+    if (attempt <= SELECT_ROLE_RETRY_TIMES) {
+      await sleepMs(LOGIN_FLOW_STEP_DELAY_MS);
+    }
+  }
+  return { ok: false, error: lastEnterRes?.error || '选角失败' };
 }
 
 function hasRenderableRoleStats(stats) {
@@ -1039,6 +1050,7 @@ function toggleStarStoneLoop() {
 
 async function handleStarStonePacket(record) {
   if (!starStoneLoopRunning || record?.direction !== 'DN') return;
+  const fingerprint = String(record?.fingerprint || '');
   const text = decodePacketText(record.raw_hex || '');
 
   if (text.includes('包裹已满')) {
@@ -1046,7 +1058,8 @@ async function handleStarStonePacket(record) {
     return;
   }
 
-  if (starStoneAwaiting === STAR_STONE_PHASE.BUY && text.includes('购买成功')) {
+  const isBuySuccessPacket = text.includes('购买成功') || fingerprint.includes('e607');
+  if (starStoneAwaiting === STAR_STONE_PHASE.BUY && isBuySuccessPacket) {
     await handleStarStoneBackpackUpdate();
     return;
   }
