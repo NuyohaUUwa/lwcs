@@ -1,8 +1,11 @@
-window.GameEvents = {
-  createEventSource(path, onMessage, onError) {
-    const es = new EventSource(path);
-    es.onmessage = onMessage;
-    es.onerror = onError;
-    return es;
-  },
-};
+(function initGameEventsShell() {
+  window.GameEvents = {
+    createEventSource(path, onMessage, onError) {
+      const events = window.GameAdapters?.events;
+      if (!events) {
+        throw new Error('Game event adapter not loaded yet');
+      }
+      return events.createEventSource(path, onMessage, onError);
+    },
+  };
+})();

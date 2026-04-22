@@ -1,7 +1,6 @@
-"""
-统一网络 I/O 入口。
-任何业务模块都只能通过本模块建立连接、发送报文、接收报文和启动运行时线程。
-"""
+"""统一网络 I/O 入口。"""
+
+# pyright: reportAttributeAccessIssue=false, reportMissingTypeArgument=false, reportArgumentType=false
 
 import binascii
 import queue
@@ -10,10 +9,10 @@ import threading
 import time
 from typing import Callable, Optional
 
-from config import RECV_BUFSIZE, SEND_INTERVAL
-from core.codec import split_game_frame_bytes
-from core.session import get_session
-from features.packet_probe import record_packet
+from game_test.backend.infrastructure.config import RECV_BUFSIZE, SEND_INTERVAL
+from game_test.backend.runtime import get_session
+from game_test.core.codec import split_game_frame_bytes
+from game_test.backend.domain.packet.probe import record_packet
 
 _F703_PACKET_MARK = "e8030500f703"
 _BATTLE_WAITING_STATES = {"waiting_start_response", "waiting_action_result"}

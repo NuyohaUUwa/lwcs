@@ -4,19 +4,13 @@
 启动后访问：http://127.0.0.1:7896/
 """
 
-import sys
-import os
-
-# 将 game_test 目录加入模块搜索路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from paths import ensure_data_directories
+from game_test.backend.infrastructure.config import API_DEBUG, API_HOST, API_PORT
+from game_test.backend.infrastructure.packet_log_service import init_packet_log_session
+from game_test.backend.infrastructure.paths import ensure_data_directories
 
 ensure_data_directories()
 
-from api.server import app
-from config import API_DEBUG, API_HOST, API_PORT
-from services.packet_log_service import init_packet_log_session
+from game_test.api.server import app
 
 if __name__ == "__main__":
     init_packet_log_session()
