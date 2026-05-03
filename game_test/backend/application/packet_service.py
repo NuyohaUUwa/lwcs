@@ -22,6 +22,11 @@ def list_packets(
     return {"ok": True, "total": len(records), "packets": records}
 
 
+def clear_packets() -> dict[str, Any]:
+    cleared = get_session().clear_packet_log()
+    return {"ok": True, "cleared": cleared}
+
+
 def annotate_packet(packet_id: int, text: str) -> dict[str, Any]:
     return probe.annotate_packet(packet_id, text)
 

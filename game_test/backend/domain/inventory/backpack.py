@@ -53,8 +53,12 @@ def _collect_items(packet_hex: str, item_type: str) -> list[Item]:
     for pos in positions:
         try:
             item_id = packet_hex[pos + 4 : pos + 16]
-            item_num_hex = packet_hex[pos + 17 : pos + 22]
-            item_num = int(item_num_hex, 16)
+            # 数量：item_id（6 字节）后固定再 2 字节 padding，接着 2 字节 uint16 LE（与 d607 实际报文对齐）。
+            # 旧实现取 [pos+17:pos+22] 共 5 个 hex 半字节错位，会把 0x0140(320) 读成 0x40(64)、把 0x0773(1907) 读成 0x73(115)。
+            qty_hex = packet_hex[pos + 20 : pos + 24]
+            if len(qty_hex) < 4:
+                continue
+            item_num = int.from_bytes(bytes.fromhex(qty_hex), "little")
 
             name_len_hex = packet_hex[pos + 32 : pos + 38]
             name_byte_len = int(name_len_hex, 16)

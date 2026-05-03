@@ -202,6 +202,25 @@ def dispatch_feature_action(action_name: str, payload: dict[str, Any]) -> dict[s
             result["validation_warning"] = res["validation_warning"]
         return result
 
+    if action_name == "item.synthesize":
+        item_id = str(payload.get("item_id", "")).strip().lower()
+        if not item_id:
+            return {"ok": False, "error": "item_id 不能为空"}
+        try:
+            packet_hex = item_use.build_synthesize_packet(item_id)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        with session._lock:
+            if item_id not in session.backpack_items:
+                return {"ok": False, "error": "背包中不存在该物品"}
+        res = send_raw_action(packet_hex, priority=0, use_queue=True)
+        if not res.get("ok"):
+            return res
+        result = {"ok": True, "queued": 1}
+        if res.get("validation_warning"):
+            result["validation_warning"] = res["validation_warning"]
+        return result
+
     if action_name == "item.decompose_all":
         protected_items = payload.get("protected_items", [])
         targets, skipped = item_use.pick_decompose_targets(protected_items)

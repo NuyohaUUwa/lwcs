@@ -17,6 +17,11 @@ def _normalize_hex(value: str, expected_len: int, name: str) -> str:
     return clean
 
 
+def normalize_backpack_item_id_12(value: str) -> str:
+    """背包 item_id 的 12 位 hex 校验，供 API / 流程复用。"""
+    return _normalize_hex(value, 12, "item_id")
+
+
 def _normalize_hex_even_range(value: str, min_len: int, max_len: int, name: str) -> str:
     clean = str(value or "").strip().lower()
     if len(clean) < min_len or len(clean) > max_len or len(clean) % 2 != 0:
@@ -69,6 +74,18 @@ def build_drop_item_packet(item_id: str, quantity: int = 1) -> tuple[str, int]:
 def build_decompose_packet(item_id: str) -> str:
     random_num = random_num_hex6()
     return "1a000000e8030800412a" + random_num + "05462a000008000000" + item_id + "0000"
+
+
+def build_synthesize_packet(item_id: str) -> str:
+    """合成报文：3f2a 后为 random_num_hex4；末尾 12 hex 为背包 item_id（与 d607 解析一致），再接 0000。"""
+    iid = _normalize_hex(item_id, 12, "item_id")
+    return (
+        "1a000000e80308003f2a"
+        + random_num_hex4()
+        + "f605442a000008000000"
+        + iid
+        + "0000"
+    )
 
 
 def build_exchange_wuling_packet() -> str:
@@ -141,3 +158,28 @@ def optimistic_decompose_items(items: list):
             else:
                 existing.quantity -= 1
     session.notify_backpack_update()
+
+
+# 下行 e80301004f51：合成结果（UTF-8 提示嵌在报文内）
+_SYNTHESIS_RESPONSE_FP = "e80301004f51"
+# 与游戏服返回的 UTF-8 一致（小写 hex）
+_SYNTH_HEX_OK = "e59088e68890e68890e58a9fefbc81"  # 合成成功！
+_SYNTH_HEX_FAIL = "e59088e68890e5a4b1e8b4a5efbc81"  # 合成失败！
+_SYNTH_HEX_INSUFF = "e8afa5e789a9e59381e695b0e9878fe4b88de8b6b3"  # 该物品数量不足（前缀）
+
+
+def try_parse_synthesis_response_packet(packet_hex: str) -> dict | None:
+    """
+    识别合成结果下行包；可识别则返回
+    { outcome: 'ok' | 'fail' | 'insufficient', message: str }，否则返回 None。
+    """
+    h = str(packet_hex or "").strip().lower().replace(" ", "")
+    if len(h) < 20 or h[8:20] != _SYNTHESIS_RESPONSE_FP:
+        return None
+    if _SYNTH_HEX_INSUFF in h:
+        return {"outcome": "insufficient", "message": "该物品数量不足，无法进行合成。"}
+    if _SYNTH_HEX_FAIL in h:
+        return {"outcome": "fail", "message": "合成失败！"}
+    if _SYNTH_HEX_OK in h:
+        return {"outcome": "ok", "message": "合成成功！"}
+    return None

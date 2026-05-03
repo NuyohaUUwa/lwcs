@@ -10,6 +10,7 @@ from ...application.inventory_service import (
     exchange_wuling,
     get_backpack,
     refresh_backpack,
+    synthesize_item,
     use_item,
 )
 from ..serializers import _json_ok
@@ -42,6 +43,11 @@ def api_item_drop():
 @blueprint.route("/item/decompose", methods=["POST"])
 def api_item_decompose():
     return _json_ok(decompose_item(get_json_body()))
+
+
+@blueprint.route("/item/synthesize", methods=["POST"])
+def api_item_synthesize():
+    return _json_ok(synthesize_item(get_json_body()))
 
 
 @blueprint.route("/item/decompose-all", methods=["POST"])

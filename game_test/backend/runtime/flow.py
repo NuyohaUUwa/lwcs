@@ -28,6 +28,7 @@ from game_test.backend.domain.combat.battle import (
 )
 from game_test.backend.domain.communication.heartbeat import start_heartbeat
 from game_test.backend.domain.inventory.backpack import dispatch_backpack_packet
+from game_test.backend.domain.inventory.item_use import try_parse_synthesis_response_packet
 from game_test.backend.domain.packet.probe import record_packet
 from game_test.backend.domain.roles.role_stats import merge_role_stats_from_packet, update_session_stats
 from game_test.backend.domain.roles.roles import (
@@ -407,6 +408,16 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
     fingerprint = hex_str[8:20] if len(hex_str) >= 20 else ""
     if _is_banned_role_packet(hex_str):
         _handle_banned_role_packet()
+        return
+    if fingerprint == "e80301004f51":
+        parsed = try_parse_synthesis_response_packet(hex_str)
+        if parsed is not None:
+            from game_test.backend.application.flow_service import (
+                deliver_synthesis_batch_response,
+            )
+
+            if not deliver_synthesis_batch_response(parsed):
+                session.notify_synthesis_result(parsed)
         return
     if "d607" in fingerprint:
         dispatch_backpack_packet(hex_str)

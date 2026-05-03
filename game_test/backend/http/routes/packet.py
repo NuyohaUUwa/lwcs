@@ -4,6 +4,7 @@ from flask import Blueprint, jsonify, request
 
 from ...application.packet_service import (
     annotate_packet as app_annotate_packet,
+    clear_packets,
     delete_fingerprint,
     get_fingerprints,
     list_packets,
@@ -18,8 +19,11 @@ from ..validators import get_json_body
 blueprint = Blueprint("http_packet", __name__, url_prefix="/api")
 
 
-@blueprint.route("/packets", methods=["GET"])
+@blueprint.route("/packets", methods=["GET", "DELETE"])
 def api_packets():
+    if request.method == "DELETE":
+        return jsonify(clear_packets())
+
     limit = int(request.args.get("limit", 100))
     direction = request.args.get("direction", "").upper() or None
     parsed_param = request.args.get("parsed", "")

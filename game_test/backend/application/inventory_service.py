@@ -47,6 +47,10 @@ def decompose_item(payload: dict[str, Any]) -> dict[str, Any]:
     return send_action("item.decompose", payload)
 
 
+def synthesize_item(payload: dict[str, Any]) -> dict[str, Any]:
+    return send_action("item.synthesize", payload)
+
+
 def decompose_all_items(payload: dict[str, Any]) -> dict[str, Any]:
     protected_items = payload.get("protected_items")
     if protected_items is None:

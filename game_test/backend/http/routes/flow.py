@@ -5,12 +5,15 @@ from flask import Blueprint, jsonify
 from ...application.flow_service import (
     get_liaoguo_status,
     get_star_stone_status,
+    get_synthesis_batch_status,
     get_transport_supply_status,
     start_liaoguo,
     start_star_stone_loop,
+    start_synthesis_batch,
     start_transport_supply,
     stop_liaoguo,
     stop_star_stone_loop,
+    stop_synthesis_batch,
     stop_transport_supply,
 )
 from ..serializers import _json_ok
@@ -64,3 +67,19 @@ def api_liaoguo_stop():
 @blueprint.route("/flow/liaoguo/status", methods=["GET"])
 def api_liaoguo_status():
     return jsonify(get_liaoguo_status())
+
+
+@blueprint.route("/flow/synthesis-batch/start", methods=["POST"])
+def api_synthesis_batch_start():
+    body = get_json_body()
+    return _json_ok(start_synthesis_batch(str(body.get("item_id", "")).strip().lower()))
+
+
+@blueprint.route("/flow/synthesis-batch/stop", methods=["POST"])
+def api_synthesis_batch_stop():
+    return _json_ok(stop_synthesis_batch())
+
+
+@blueprint.route("/flow/synthesis-batch/status", methods=["GET"])
+def api_synthesis_batch_status():
+    return jsonify(get_synthesis_batch_status())

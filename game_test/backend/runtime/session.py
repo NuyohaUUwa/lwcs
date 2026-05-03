@@ -171,6 +171,12 @@ class GameSession:
             self._packet_log.append(record)
         self._notify_sse("packet", record)
 
+    def clear_packet_log(self) -> int:
+        with self._lock:
+            cleared = len(self._packet_log)
+            self._packet_log.clear()
+        return cleared
+
     def get_packet_log(
         self,
         limit: int = 100,
@@ -227,6 +233,10 @@ class GameSession:
 
     def notify_backpack_update(self):
         self._notify_sse("backpack", self.get_backpack_list())
+
+    def notify_synthesis_result(self, payload: dict[str, Any]) -> None:
+        """合成结果（e80301004f51），供前端在背包区展示。"""
+        self._notify_sse("synthesis_result", dict(payload))
 
     def notify_status_change(self):
         self._notify_sse("status", self.get_status())

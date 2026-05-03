@@ -284,8 +284,8 @@ def validate_all(rows: list[dict[str, Any]]) -> str | None:
 
 def launch_instances(rows: list[dict[str, Any]]) -> tuple[dict[int, subprocess.Popen], list[str]]:
     base = game_test_dir()
+    project_root = os.path.dirname(base)
     data_root = os.path.abspath(os.path.join(base, "data"))
-    run_py = os.path.join(base, "run.py")
     by_port: dict[int, subprocess.Popen] = {}
     lines: list[str] = []
 
@@ -300,8 +300,8 @@ def launch_instances(rows: list[dict[str, Any]]) -> tuple[dict[int, subprocess.P
         env["LWCS_DATA_ROOT"] = data_root
 
         proc = subprocess.Popen(
-            [sys.executable, run_py],
-            cwd=base,
+            [sys.executable, "-m", "game_test.run"],
+            cwd=project_root,
             env=env,
         )
         by_port[port] = proc
@@ -574,24 +574,40 @@ class MultiLaunchApp(tk.Tk):
         if not norm:
             messagebox.showwarning("提示", "列表为空，请先点「新建」。")
             return
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选中要启动的一行。")
+            return
+        iid = sel[0]
+        port_sel = self._tree_port(iid)
+        if port_sel is None:
+            messagebox.showerror("错误", "无法解析该行端口")
+            return
+        row_sel: dict[str, Any] | None = None
+        for r in norm:
+            if int(r["port"]) == port_sel:
+                row_sel = r
+                break
+        if row_sel is None:
+            messagebox.showerror("错误", "选中行与配置不一致")
+            return
         err = validate_all(norm)
         if err:
             messagebox.showerror("校验失败", err)
             return
         if not self._persist_tree():
             return
-        for row in norm:
-            port = int(row["port"])
-            p = self._procs.get(port)
-            if p is not None and p.poll() is None:
-                p.terminate()
-                try:
-                    p.wait(timeout=2.5)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-            self._procs.pop(port, None)
+        port = int(row_sel["port"])
+        p = self._procs.get(port)
+        if p is not None and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=2.5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        self._procs.pop(port, None)
         try:
-            by_port, lines = launch_instances(norm)
+            by_port, lines = launch_instances([row_sel])
         except Exception as e:
             messagebox.showerror("启动失败", str(e))
             return

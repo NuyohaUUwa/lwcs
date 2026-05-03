@@ -1,11 +1,13 @@
-"""HTTP-facing complex flow façade (star-stone, transport-supply, liaoguo)."""
+"""HTTP-facing complex flow façade (star-stone, transport-supply, liaoguo, synthesis-batch)."""
 
+import queue
 import threading
 import time
 from typing import Any
 
+from game_test.backend.domain.inventory.item_use import build_synthesize_packet, normalize_backpack_item_id_12
 from game_test.backend.runtime import get_session
-from game_test.backend.runtime.actions import send_action
+from game_test.backend.runtime.actions import send_action, send_raw_action
 
 
 def _emit_flow_log(scope: str, message: str, *, level: str = "info", **extra):
@@ -24,10 +26,13 @@ def _emit_flow_status() -> None:
         ts_running = _transport_supply_state.running
     with _liaoguo_state.lock:
         lg_running = _liaoguo_state.running
+    with _synthesis_batch_state.lock:
+        sb_running = _synthesis_batch_state.running
     session._notify_sse("flow_status", {
         "star_stone_running": ss_running,
         "transport_supply_running": ts_running,
         "liaoguo_running": lg_running,
+        "synthesis_batch_running": sb_running,
     })
 
 
@@ -36,6 +41,8 @@ def _emit_flow_status() -> None:
 # =============================================================================
 _STAR_STONE_TARGET_NAME_RE = "特步"
 _STAR_STONE_LOOP_INTERVAL_S = 1.0
+# 购买后等背包落特步类物品再分解（等 d607/ec07），秒
+_STAR_STONE_BACKPACK_WAIT_S = 6.0
 _STAR_STONE_PHASE_IDLE = "idle"
 _STAR_STONE_PHASE_BUY = "buy"
 _STAR_STONE_PHASE_DECOMPOSE = "decompose"
@@ -87,16 +94,44 @@ def _find_star_stone_buy_favorite() -> dict[str, Any] | None:
     return None
 
 
+def _find_backpack_item_id_for_star_stone() -> str | None:
+    """名称含「特步」的背包格（与购买配置一致，用于买后分解）。"""
+    session = get_session()
+    with session._lock:
+        for it in session.backpack_items.values():
+            if _STAR_STONE_TARGET_NAME_RE in (it.name or ""):
+                return it.item_id
+    return None
+
+
+def _wait_backpack_item_id_for_star_stone(*, timeout_s: float) -> str | None:
+    deadline = time.time() + max(0.1, timeout_s)
+    while time.time() < deadline:
+        if _star_stone_state.stop_event.is_set():
+            return None
+        iid = _find_backpack_item_id_for_star_stone()
+        if iid:
+            return iid
+        time.sleep(0.2)
+    return None
+
+
 def _run_star_stone_loop() -> None:
     global _star_stone_thread
+    first_round = True
     while True:
-        if _star_stone_state.stop_event.wait(timeout=_STAR_STONE_LOOP_INTERVAL_S):
+        if not first_round:
+            if _star_stone_state.stop_event.wait(timeout=_STAR_STONE_LOOP_INTERVAL_S):
+                _emit_flow_status()
+                return
+        first_round = False
+        if _star_stone_state.stop_event.is_set():
             _emit_flow_status()
             return
 
         favorite = _find_star_stone_buy_favorite()
         if not favorite:
-            _emit_flow_log("star_stone", "未找到常用购买物品「特步鞋」", level="err")
+            _emit_flow_log("star_stone", "未找到常用购买物品（名称含「特步」，如特步鞋），请「保存常用」", level="err")
             _stop_star_stone_internal()
             return
 
@@ -109,7 +144,9 @@ def _run_star_stone_loop() -> None:
             _stop_star_stone_internal()
             return
 
+        n_next = 0
         with _star_stone_state.lock:
+            n_next = _star_stone_state.loop_count + 1
             _star_stone_state.phase = _STAR_STONE_PHASE_BUY
 
         res = send_action("item.buy", {"npc_id": npc_id, "item_code": favorite.get("code", "")})
@@ -118,14 +155,49 @@ def _run_star_stone_loop() -> None:
             _stop_star_stone_internal()
             return
 
-        _emit_flow_log(
-            "star_stone",
-            f"第{_star_stone_state.loop_count + 1}轮：已发送购买 {favorite.get('name', '')}",
-        )
+        _emit_flow_log("star_stone", f"第{n_next}轮：已发购买，等待入包以分解…", level="info")
+
+        item_id = _wait_backpack_item_id_for_star_stone(timeout_s=_STAR_STONE_BACKPACK_WAIT_S)
+        if not item_id:
+            if _star_stone_state.stop_event.is_set():
+                _emit_flow_status()
+                return
+            with _star_stone_state.lock:
+                _star_stone_state.phase = _STAR_STONE_PHASE_IDLE
+                _star_stone_state.loop_count += 1
+            _emit_flow_log(
+                "star_stone",
+                f"第{n_next}轮：{int(_STAR_STONE_BACKPACK_WAIT_S)}s 内未在背包发现特步类物品，已跳过本次分解",
+                level="warn",
+            )
+            continue
 
         with _star_stone_state.lock:
+            _star_stone_state.phase = _STAR_STONE_PHASE_DECOMPOSE
+        dres = send_action("item.decompose", {"item_id": item_id})
+        with _star_stone_state.lock:
             _star_stone_state.phase = _STAR_STONE_PHASE_IDLE
+        if not dres.get("ok"):
+            with _star_stone_state.lock:
+                _star_stone_state.loop_count += 1
+            _emit_flow_log(
+                "star_stone",
+                f"第{n_next}轮：分解失败 — {dres.get('error', '未知错误')}",
+                level="err",
+            )
+            continue
+
+        with _star_stone_state.lock:
+            _star_stone_state.total_stone += 11
+            _star_stone_state.total_fragment += 23
             _star_stone_state.loop_count += 1
+            stone = _star_stone_state.total_stone
+            frag = _star_stone_state.total_fragment
+        _emit_flow_log(
+            "star_stone",
+            f"第{n_next}轮：已分解，累计获得：升星石 {stone}、宝石碎片 {frag}",
+            level="ok",
+        )
 
 
 def _stop_star_stone_internal() -> None:
@@ -174,6 +246,9 @@ _TRANSPORT_SUPPLY_MAX_ROUNDS = 10
 _TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS = 180000
 _TRANSPORT_SUPPLY_DELIVER_RETRY_MS = 5000
 _TRANSPORT_SUPPLY_WAIT_BUY_MS = 65000
+_TRANSPORT_SUPPLY_BUY_ACK_FP = "e8030100e607"
+_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S = 30.0
+_TRANSPORT_SUPPLY_BUY_FAIL_TEXT = "领取失败"
 
 
 def _build_transport_deliver_hex(npc_id: str) -> str:
@@ -189,6 +264,55 @@ def _build_transport_deliver_hex(npc_id: str) -> str:
 
 def _is_transport_completion(fp: str) -> bool:
     return _TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX in fp.lower()
+
+
+def _packet_record_utf8(rec: dict[str, Any]) -> str:
+    parsed = rec.get("parsed")
+    if isinstance(parsed, dict):
+        return str(parsed.get("utf8_text") or "")
+    return ""
+
+
+def _is_transport_buy_success_message(text: str) -> bool:
+    """购买成功：下行文案需同时含「1000金消失了」「获得」「5级物资」。"""
+    if not text:
+        return False
+    compact = text.replace("\r", "").replace("\n", "")
+    return "1000金消失了" in compact and "获得" in compact and "5级物资" in compact
+
+
+def _wait_for_transport_buy_dn_ack(*, marker_id: int, timeout_s: float) -> dict[str, Any]:
+    """等待购买后的 e8030100e607 下行，区分成功文案与「领取失败」。"""
+    deadline = time.time() + timeout_s
+    target = _TRANSPORT_SUPPLY_BUY_ACK_FP.lower()
+    logged_unknown: set[int] = set()
+    while time.time() < deadline:
+        if _transport_supply_state.stop_event.wait(timeout=0):
+            return {"ok": False, "reason": "stopped"}
+        packet_log = get_session().get_packet_log(limit=200, direction="DN")
+        rows = sorted(
+            (r for r in packet_log if int(r.get("id") or 0) > marker_id),
+            key=lambda r: int(r.get("id") or 0),
+        )
+        for rec in rows:
+            fp = (rec.get("fingerprint") or "").lower()
+            if target not in fp:
+                continue
+            rid = int(rec.get("id") or 0)
+            text = _packet_record_utf8(rec)
+            if _TRANSPORT_SUPPLY_BUY_FAIL_TEXT in text:
+                return {"ok": False, "reason": "claim_failed", "utf8_text": text, "record_id": rid}
+            if _is_transport_buy_success_message(text):
+                return {"ok": True, "utf8_text": text, "record_id": rid}
+            if rid not in logged_unknown:
+                logged_unknown.add(rid)
+                preview = (text[:240].replace("\n", " ").strip() if text else "(空)")
+                _emit_transport_log(
+                    f"收到购买响应 e607，文案未匹配成功/失败关键字，将忽略此条并继续等待。预览：{preview}",
+                    level="info",
+                )
+        time.sleep(0.2)
+    return {"ok": False, "reason": "timeout"}
 
 
 def _find_reward_item() -> dict[str, Any] | None:
@@ -287,10 +411,46 @@ def _run_transport_supply_loop() -> None:
             break
 
         _emit_transport_log(f"第 {round_num} 轮：发送购买物资（NPC {npc_id}）…", level="info")
+        marker_id = _latest_dn_packet_id()
         buy_res = send_action("item.buy", {"npc_id": npc_id, "item_code": _TRANSPORT_SUPPLY_BUY_ITEM_CODE})
         if not buy_res.get("ok"):
             _emit_transport_log(f"购买发送失败：{buy_res.get('error', '未知错误')}", level="err")
             break
+
+        _emit_transport_log(
+            f"等待购买结果下行（指纹 {_TRANSPORT_SUPPLY_BUY_ACK_FP}），最长 {_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S:.0f}s…",
+            level="info",
+        )
+        buy_ack = _wait_for_transport_buy_dn_ack(
+            marker_id=marker_id, timeout_s=_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S
+        )
+        if buy_ack.get("reason") == "stopped":
+            _emit_transport_log("已停止（等待购买响应阶段中断）", level="info")
+            break
+        if not buy_ack.get("ok"):
+            if buy_ack.get("reason") == "claim_failed":
+                detail = str(buy_ack.get("utf8_text") or "")
+                snippet = detail.replace("\n", " ").strip()[:300] if detail else ""
+                _emit_transport_log(
+                    f"购买失败：服务端返回「{_TRANSPORT_SUPPLY_BUY_FAIL_TEXT}」。原文摘要：{snippet or '(无文本)'}",
+                    level="err",
+                )
+            elif buy_ack.get("reason") == "timeout":
+                _emit_transport_log(
+                    f"购买确认超时：{_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S:.0f}s 内未收到 "
+                    f"{_TRANSPORT_SUPPLY_BUY_ACK_FP} 且含「1000金消失了」「获得」「5级物资」的成功文案",
+                    level="err",
+                )
+            else:
+                _emit_transport_log(f"购买确认失败：{buy_ack.get('reason', '未知')}", level="err")
+            break
+
+        ok_text = str(buy_ack.get("utf8_text") or "").replace("\n", " ").strip()
+        ok_preview = ok_text[:400] + ("…" if len(ok_text) > 400 else "")
+        _emit_transport_log(
+            f"购买成功：已收到 {_TRANSPORT_SUPPLY_BUY_ACK_FP}，文案匹配（1000金消失 / 获得 / 5级物资）。{ok_preview}",
+            level="ok",
+        )
 
         time.sleep(0.8)
         if _transport_supply_state.stop_event.wait(timeout=0):
@@ -408,15 +568,30 @@ def _build_abandon_task_packet(abandon_code: str) -> str:
     return f"18000000e80306000004{r}f5050304000006000000{abandon_code}07000000"
 
 
-def _wait_for_fingerprint(target_fp: str, timeout_s: float = 20.0) -> dict[str, Any]:
+def _latest_dn_packet_id() -> int:
+    packet_log = get_session().get_packet_log(limit=1, direction="DN")
+    if not packet_log:
+        return 0
+    try:
+        return int(packet_log[-1].get("id") or 0)
+    except Exception:
+        return 0
+
+
+def _wait_for_fingerprint(target_fp: str, timeout_s: float = 20.0, *, min_record_id: int = 0) -> dict[str, Any]:
     deadline = time.time() + timeout_s
+    target = target_fp.lower()
     while time.time() < deadline:
         if _liaoguo_state.stop_event.is_set():
             return {"ok": False, "reason": "stopped"}
-        packet_log = get_session().get_packet_log(limit=100, direction="DN")
+        packet_log = get_session().get_packet_log(limit=200, direction="DN")
         for rec in reversed(packet_log):
+            rec_id = int(rec.get("id") or 0)
+            if rec_id <= min_record_id:
+                # 只接受本步骤发送之后的新下行，避免误命中历史包导致流程看起来乱序
+                continue
             fp = (rec.get("fingerprint") or "").lower()
-            if target_fp.lower() in fp:
+            if target in fp:
                 return {"ok": True, "record": rec}
         time.sleep(0.2)
     return {"ok": False, "reason": "timeout"}
@@ -447,13 +622,14 @@ def _run_liaoguo_flow(pair: dict[str, Any]) -> None:
         return
 
     _emit_liaoguo_log(f"步骤1/4 兑换任务券（NPC {npc_id}）…", level="info")
+    marker_id = _latest_dn_packet_id()
     buy_res = send_action("item.buy", {"npc_id": npc_id, "item_code": item_code})
     if not buy_res.get("ok"):
         _emit_liaoguo_log(f"兑换任务券失败：{buy_res.get('error', '未知错误')}", level="err")
         _emit_flow_status()
         return
 
-    ack = _wait_for_fingerprint("e8030100e607", _LIAOGUO_PAIR_WAIT_TIMEOUT_S)
+    ack = _wait_for_fingerprint("e8030100e607", _LIAOGUO_PAIR_WAIT_TIMEOUT_S, min_record_id=marker_id)
     if _liaoguo_state.stop_event.is_set():
         _emit_flow_status()
         return
@@ -465,13 +641,14 @@ def _run_liaoguo_flow(pair: dict[str, Any]) -> None:
 
     abandon_hex = _build_abandon_task_packet(abandon_task_code)
     _emit_liaoguo_log(f"步骤2/4 放弃任务（code {abandon_task_code}）…", level="info")
+    marker_id = _latest_dn_packet_id()
     abandon_res = send_action("probe.send", {"hex": abandon_hex, "use_queue": True})
     if not abandon_res.get("ok"):
         _emit_liaoguo_log(f"放弃任务失败：{abandon_res.get('error', '未知错误')}", level="err")
         _emit_flow_status()
         return
 
-    ack = _wait_for_fingerprint("e8030100e807", _LIAOGUO_PAIR_WAIT_TIMEOUT_S)
+    ack = _wait_for_fingerprint("e8030100e807", _LIAOGUO_PAIR_WAIT_TIMEOUT_S, min_record_id=marker_id)
     if _liaoguo_state.stop_event.is_set():
         _emit_flow_status()
         return
@@ -482,13 +659,14 @@ def _run_liaoguo_flow(pair: dict[str, Any]) -> None:
     _emit_liaoguo_log("已收到放弃任务响应 e8030100e807", level="ok")
 
     _emit_liaoguo_log(f"步骤3/4 使用任务券（{ticket_item_code}）…", level="info")
+    marker_id = _latest_dn_packet_id()
     use_res = send_action("item.use", {"item_code": ticket_item_code, "quantity": 1})
     if not use_res.get("ok"):
         _emit_liaoguo_log(f"使用任务券失败：{use_res.get('error', '未知错误')}", level="err")
         _emit_flow_status()
         return
 
-    ack = _wait_for_fingerprint("e8030100ec07", _LIAOGUO_PAIR_WAIT_TIMEOUT_S)
+    ack = _wait_for_fingerprint("e8030100ec07", _LIAOGUO_PAIR_WAIT_TIMEOUT_S, min_record_id=marker_id)
     if _liaoguo_state.stop_event.is_set():
         _emit_flow_status()
         return
@@ -499,13 +677,14 @@ def _run_liaoguo_flow(pair: dict[str, Any]) -> None:
     _emit_liaoguo_log("已收到已接受任务响应 e8030100ec07", level="ok")
 
     _emit_liaoguo_log(f"步骤4/4 辽国战斗（怪物 {monster_code}），等待结算 e8030100e207…", level="info")
+    marker_id = _latest_dn_packet_id()
     battle_res = send_action("battle.start", {"monster_code": monster_code, "run_pre_battle_actions": True})
     if not battle_res.get("ok"):
         _emit_liaoguo_log(f"战斗启动失败：{battle_res.get('error', '未知错误')}", level="err")
         _emit_flow_status()
         return
 
-    settle = _wait_for_fingerprint("e8030100e207", _LIAOGUO_E207_SETTLEMENT_TIMEOUT_S)
+    settle = _wait_for_fingerprint("e8030100e207", _LIAOGUO_E207_SETTLEMENT_TIMEOUT_S, min_record_id=marker_id)
     if _liaoguo_state.stop_event.is_set():
         _emit_flow_status()
         return
@@ -545,5 +724,204 @@ def stop_liaoguo() -> dict[str, Any]:
         _liaoguo_state.running = False
     _liaoguo_state.stop_event.set()
     _emit_liaoguo_log("已请求停止…", level="info")
+    _emit_flow_status()
+    return {"ok": True}
+
+
+# =============================================================================
+# 一键合成：连续发包直至 e80301004f51 返回「数量不足」
+# =============================================================================
+_synthesis_batch_result_q: "queue.Queue[dict[str, Any]]" = queue.Queue()
+
+
+class _SynthesisBatchState:
+    def __init__(self) -> None:
+        self.running: bool = False
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+        self.expect: bool = False
+        self.finish_sent: bool = False
+        self.item_id: str = ""
+
+
+_synthesis_batch_state = _SynthesisBatchState()
+_synthesis_batch_thread: threading.Thread | None = None
+
+
+def _drain_synthesis_batch_queue() -> None:
+    while True:
+        try:
+            _synthesis_batch_result_q.get_nowait()
+        except queue.Empty:
+            break
+
+
+def deliver_synthesis_batch_response(parsed: dict[str, Any]) -> bool:
+    """
+    收包线程：若一键合成正等待 e80301004f51，将解析结果交给工作线程，并返回 True
+    （此时不单独推 synthesis_result，避免与批量日志重复）。
+    """
+    st = _synthesis_batch_state
+    with st.lock:
+        if not (st.running and st.expect):
+            return False
+    try:
+        _synthesis_batch_result_q.put_nowait(dict(parsed))
+    except Exception:
+        return False
+    with st.lock:
+        st.expect = False
+    return True
+
+
+def _synthesis_batch_wait_response(timeout_s: float) -> dict[str, Any] | None:
+    st = _synthesis_batch_state
+    deadline = time.time() + max(0.1, timeout_s)
+    while time.time() < deadline:
+        if st.stop_event.is_set():
+            with st.lock:
+                st.expect = False
+            return None
+        try:
+            return _synthesis_batch_result_q.get(timeout=0.2)
+        except queue.Empty:
+            pass
+    with st.lock:
+        st.expect = False
+    return None
+
+
+def _notify_synthesis_batch_finished(
+    reason: str,
+    ok: int,
+    fail: int,
+    detail: str = "",
+) -> None:
+    st = _synthesis_batch_state
+    with st.lock:
+        if st.finish_sent:
+            return
+        st.finish_sent = True
+    session = get_session()
+    session._notify_sse(
+        "synthesis_batch",
+        {
+            "state": "finished",
+            "reason": reason,
+            "ok": ok,
+            "fail": fail,
+            "message": detail,
+        },
+    )
+    session.notify_backpack_update()
+
+
+def _synthesis_batch_worker(item_id: str) -> None:
+    st = _synthesis_batch_state
+    success = 0
+    fail = 0
+    try:
+        while not st.stop_event.is_set():
+            session = get_session()
+            with session._lock:
+                if item_id not in session.backpack_items:
+                    _emit_flow_log("synthesis_batch", "物品已不在背包，已停止", level="err")
+                    _notify_synthesis_batch_finished("not_in_backpack", success, fail, "物品已不在背包")
+                    return
+            _drain_synthesis_batch_queue()
+            with st.lock:
+                st.expect = True
+            res = send_raw_action(build_synthesize_packet(item_id), priority=0, use_queue=True)
+            if not res.get("ok"):
+                err = str(res.get("error", "发送失败"))
+                _emit_flow_log("synthesis_batch", f"发送失败：{err}", level="err")
+                _notify_synthesis_batch_finished("send_error", success, fail, err)
+                return
+            resp = _synthesis_batch_wait_response(30.0)
+            if resp is None:
+                if st.stop_event.is_set():
+                    _emit_flow_log("synthesis_batch", "已按请求停止", level="info")
+                    _notify_synthesis_batch_finished("user", success, fail, "")
+                else:
+                    _emit_flow_log("synthesis_batch", "等待合成响应超时", level="err")
+                    _notify_synthesis_batch_finished("timeout", success, fail, "等待响应超时")
+                return
+            o = str(resp.get("outcome", ""))
+            msg = str(resp.get("message", ""))
+            round_n = success + fail + 1
+            if o == "insufficient":
+                _emit_flow_log("synthesis_batch", f"第{round_n} 次：{msg}（材料不足，流程结束）", level="ok")
+                _notify_synthesis_batch_finished("insufficient", success, fail, msg)
+                return
+            if o == "ok":
+                success += 1
+            elif o == "fail":
+                fail += 1
+            _emit_flow_log(
+                "synthesis_batch",
+                f"第{round_n} 次：{msg}（累计 成功{success} / 失败{fail}）",
+                level="info",
+            )
+    except Exception as e:
+        _emit_flow_log("synthesis_batch", f"异常：{e}", level="err")
+        _notify_synthesis_batch_finished("error", success, fail, str(e))
+    finally:
+        with st.lock:
+            was_sent = st.finish_sent
+            st.running = False
+            st.expect = False
+        _drain_synthesis_batch_queue()
+        if not was_sent:
+            _notify_synthesis_batch_finished("error", success, fail, "未能正常结束")
+        _emit_flow_status()
+
+
+def get_synthesis_batch_status() -> dict[str, Any]:
+    with _synthesis_batch_state.lock:
+        return {
+            "ok": True,
+            "running": _synthesis_batch_state.running,
+            "item_id": _synthesis_batch_state.item_id,
+        }
+
+
+def start_synthesis_batch(item_id: str) -> dict[str, Any]:
+    global _synthesis_batch_thread
+    if _synthesis_batch_state.running:
+        return {"ok": False, "error": "一键合成正在运行"}
+    if not str(item_id or "").strip():
+        return {"ok": False, "error": "item_id 不能为空"}
+    try:
+        iid = normalize_backpack_item_id_12(item_id)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+    session = get_session()
+    if not session.sock or not session.connected:
+        return {"ok": False, "error": "未连接游戏服"}
+    with session._lock:
+        if iid not in session.backpack_items:
+            return {"ok": False, "error": "背包中不存在该物品"}
+
+    with _synthesis_batch_state.lock:
+        _synthesis_batch_state.running = True
+        _synthesis_batch_state.stop_event.clear()
+        _synthesis_batch_state.expect = False
+        _synthesis_batch_state.finish_sent = False
+        _synthesis_batch_state.item_id = iid
+    _drain_synthesis_batch_queue()
+    _emit_flow_log("synthesis_batch", f"开始一键合成（{iid}）", level="ok")
+    _synthesis_batch_thread = threading.Thread(
+        target=_synthesis_batch_worker, args=(iid,), daemon=True, name="synthesis-batch"
+    )
+    _synthesis_batch_thread.start()
+    session._notify_sse("synthesis_batch", {"state": "started", "item_id": iid})
+    _emit_flow_status()
+    return {"ok": True, "item_id": iid}
+
+
+def stop_synthesis_batch() -> dict[str, Any]:
+    _synthesis_batch_state.stop_event.set()
+    _emit_flow_log("synthesis_batch", "已请求停止…", level="info")
     _emit_flow_status()
     return {"ok": True}

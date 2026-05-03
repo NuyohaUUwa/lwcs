@@ -16,29 +16,11 @@ let lastConnectInfo = { account: '', password: '', loginServer: '', serverIp: ''
 let buyItemFavorites = [];
 let selectedBuyItemCode = '';
 let starStoneLoopRunning = false;
-let starStoneAwaiting = 'idle';
-let starStoneLoopCount = 0;
-let starStoneTotalStone = 0;
-let starStoneTotalFragment = 0;
-let starStoneTimer = null;
-const STAR_STONE_PHASE = Object.freeze({
-  IDLE: 'idle',
-  BUY: 'buy',
-  DECOMPOSE: 'decompose',
-});
-const STAR_STONE_LOOP_INTERVAL_MS = 1000;
-const STAR_STONE_TARGET_NAME_RE = /特步(?:鞋|靴)/;
+let synthesisBatchRunning = false;
 let transportSupplyRunning = false;
-let transportSupplyStopRequested = false;
-let transportSupplyWaiter = null;
-let transportSupplyPendingRewardUses = 0;
 let liaoguoRunning = false;
-let liaoguoStopRequested = false;
 let liaoguoPairs = [];
 let selectedLiaoguoPairKey = '';
-/** 辽国流程：等待下一帧 battle_settlement_e207（e8030100e207） */
-let liaoguoE207Waiter = null;
-let liaoguoPacketWaiters = [];
 let battleMonsters = [];
 let selectedMonsterCode = '';
 let battleLogMode = 'simple'; // simple | detail
@@ -51,19 +33,8 @@ let lastStatusData = { connected: false, connection_status: 'disconnected', role
 let teleportDestinationsCache = [];
 const TELEPORT_PACKET_TEMPLATE = '18000000e80303004428{random_num}f5054728000006000000{destination}0000';
 const DAILY_CHECKIN_TEMPLATE = '20000000e80313007d2e08f4f505882e00000e0000000c00636865636b496e446f3f7b7d';
-/** 运输物资报文中的 NPC id 占位（8 hex），运行时替换为当前地图 NPC id */
-const TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER = '74010000';
-/** 运输物资购买的固定物资编码（14 位 hex） */
-const TRANSPORT_SUPPLY_BUY_ITEM_CODE = '022c9d09000000';
-const TRANSPORT_SUPPLY_DELIVER_TEMPLATE = `27000000e8030d00fe03cea8f5051004000015000000${TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER}02319d0900000000000000000000000000`;
-/** 下行完成指纹：用户描述为 e8030100e60，实际多为 e607 等，按前缀匹配 */
-const TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX = 'e8030100e60';
-const TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD = '通用10000储备金票';
-const TRANSPORT_SUPPLY_MAX_ROUNDS = 10;
-const TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS = 180000;
-const TRANSPORT_SUPPLY_DELIVER_RETRY_INTERVAL_MS = 5000;
 /** 当前地图 NPC：由后端 Python 解析后随 SSE packet.map_npc 下发 */
-let currentMapNpcFromPacket = { idHex: '', utf8Text: '' };
+let currentMapNpcFromPacket = { idHex: '38900d00', utf8Text: '通用NPC' };
 
 // ================================================================== //
 //  工具函数                                                            //
@@ -112,27 +83,25 @@ function startSSE() {
       else if (msg.type === 'control_state') setControlState(msg.data);
       else if (msg.type === 'backpack') {
         renderBackpack(msg.data);
-        handleStarStoneBackpackUpdate();
+      }
+      else if (msg.type === 'synthesis_result') {
+        onSynthesisResult(msg.data);
+      }
+      else if (msg.type === 'synthesis_batch') {
+        onSynthesisBatchEvent(msg.data);
       }
       else if (msg.type === 'packet') {
         appendPacketRow(msg.data);
         appendBattlePacketLine(msg.data);
-        handleStarStonePacket(msg.data);
-        handleTransportSupplyPacket(msg.data);
         handleMapNpcListDnPacket(msg.data);
-        notifyLiaoguoPacketWaiters(msg.data);
       }
+      else if (msg.type === 'flow_status') onFlowStatus(msg.data);
       else if (msg.type === 'annotation') updatePacketAnnotation(msg.data);
       else if (msg.type === 'role_stats') renderRoleStats(msg.data);
       else if (msg.type === 'battle_response') onBattleResponse(msg.data);
       else if (msg.type === 'battle_end') onBattleEnd(msg.data);
       else if (msg.type === 'battle_settlement_e207') {
         onBattleSettlementE207(msg.data);
-        if (liaoguoE207Waiter) {
-          const w = liaoguoE207Waiter;
-          liaoguoE207Waiter = null;
-          w.finish({ ok: true, data: msg.data });
-        }
       }
       else if (msg.type === 'battle_not_killed') onBattleNotKilled(msg.data);
       else if (msg.type === 'battle_state') onBattleState(msg.data);
@@ -267,13 +236,13 @@ function renderTopbarStatus(data) {
 }
 
 function updateStatus(data) {
+  const wasConnected = !!prevConnected;
   lastStatusData = { ...lastStatusData, ...(data || {}) };
   const d = data?.default_battle_loop_delay_ms;
   if (Number.isFinite(Number(d)) && Number(d) >= 0) {
     serverDefaultBattleLoopDelayMs = Math.floor(Number(d));
   }
   isConnected = data.connected;
-  prevConnected = isConnected;
   if (data.control_state) setControlState(data.control_state);
   if (data.battle_state) updateBattleState(data.battle_state);
 
@@ -283,6 +252,12 @@ function updateStatus(data) {
     const sc = document.getElementById('stats-content');
     if (sc) sc.innerHTML = '<span class="text-muted">等待数据...</span>';
   }
+  if (wasConnected && !isConnected) {
+    clearPacketList();
+    api('DELETE', '/api/packets')
+      .then(() => loadPackets())
+      .catch(() => {});
+  }
 
   if (isConnected) {
     // 加载角色属性（先拉取，可能为空；renderRoleStats 会铺完整骨架并用报文逐步填充）
@@ -290,6 +265,7 @@ function updateStatus(data) {
     // 启动心跳轮询（已连接时每 20s 刷新一次状态以更新心跳年龄）
     _startHeartbeatPoll();
   }
+  prevConnected = isConnected;
   renderTopbarStatus(data);
 }
 
@@ -733,6 +709,21 @@ async function decomposeSelected() {
   showMsg('backpack-msg', res.ok ? withValidationWarning('分解请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
 }
 
+async function synthesizeSelected() {
+  if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
+  const res = await api('POST', '/api/item/synthesize', { item_id: selectedItemId });
+  showMsg('backpack-msg', res.ok ? withValidationWarning('合成请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
+}
+
+/** 下行 e80301004f51 合成结果，与「合成请求已入队」区分展示 */
+function onSynthesisResult(data) {
+  const msg = data && (data.message != null ? String(data.message) : '');
+  const o = data && data.outcome;
+  if (!msg) return;
+  const level = o === 'ok' ? 'ok' : 'err';
+  showMsg('backpack-msg', msg, level);
+}
+
 async function decomposeAll() {
   const role = document.getElementById('role-badge').textContent;
   const jobMap = { '侠客': ['侠士战甲','侠士头盔'], '刺客': ['刺客战甲','刺客头盔'], '术士': ['术士战甲','术士头盔'] };
@@ -833,14 +824,28 @@ async function deleteBuyItem() {
   }
 }
 
-function appendStarStoneLog(text, kind = 'info') {
-  const box = document.getElementById('star-stone-log');
+function appendBackpackFlowLog(text, kind = 'info') {
+  const box = document.getElementById('backpack-flow-log');
   if (!box) return;
   const line = document.createElement('div');
   line.className = kind === 'err' ? 'text-red' : kind === 'ok' ? 'text-green' : 'text-muted';
   line.textContent = text;
   box.appendChild(line);
   box.scrollTop = box.scrollHeight;
+}
+
+function clearBackpackFlowLog() {
+  const box = document.getElementById('backpack-flow-log');
+  if (!box) return;
+  box.innerHTML = '';
+}
+
+function appendStarStoneLog(text, kind = 'info') {
+  appendBackpackFlowLog(text, kind);
+}
+
+function clearStarStoneLog() {
+  clearBackpackFlowLog();
 }
 
 function updateStarStoneButton() {
@@ -850,22 +855,102 @@ function updateStarStoneButton() {
   btn.className = starStoneLoopRunning ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
 }
 
-function clearStarStoneTimer() {
-  if (starStoneTimer) {
-    clearTimeout(starStoneTimer);
-    starStoneTimer = null;
+function appendSynthesisBatchLog(text, kind = 'info') {
+  appendBackpackFlowLog(text, kind);
+}
+
+function clearSynthesisBatchLog() {
+  clearBackpackFlowLog();
+}
+
+function setBackpackSynthesisBatchUiLocked(locked) {
+  document.querySelectorAll('#backpack-actions [data-synth-disable="1"]').forEach((el) => {
+    el.disabled = !!locked;
+  });
+}
+
+function updateSynthesisBatchButton() {
+  const btn = document.getElementById('btn-synthesis-batch');
+  if (!btn) return;
+  btn.textContent = synthesisBatchRunning ? '停止一键合成' : '一键合成';
+  btn.className = synthesisBatchRunning
+    ? 'btn btn-danger btn-sm'
+    : 'btn btn-primary btn-sm';
+}
+
+function formatSynthesisBatchFinished(data) {
+  const ok = Number(data?.ok ?? 0) || 0;
+  const fail = Number(data?.fail ?? 0) || 0;
+  const r = data?.reason;
+  const map = {
+    insufficient: '已因材料不足（数量不足）结束',
+    user: '已手动停止',
+    timeout: '等待服务器响应超时',
+    not_in_backpack: '物品已不在背包',
+    send_error: '发包失败',
+    error: '发生异常',
+  };
+  const extra = (r && map[r]) || (data?.message ? String(data.message) : '') || (r || '');
+  return `一键合成已结束。成功 ${ok} 次，失败 ${fail} 次。${extra ? `（${extra}）` : ''}`;
+}
+
+function onSynthesisBatchEvent(data) {
+  if (!data) return;
+  if (data.state === 'started') {
+    synthesisBatchRunning = true;
+    updateSynthesisBatchButton();
+    setBackpackSynthesisBatchUiLocked(true);
+    return;
+  }
+  if (data.state === 'finished') {
+    synthesisBatchRunning = false;
+    updateSynthesisBatchButton();
+    setBackpackSynthesisBatchUiLocked(false);
+    const r = data.reason;
+    const level = r === 'insufficient' ? 'ok' : (r === 'user' ? 'ok' : 'err');
+    showMsg('backpack-msg', formatSynthesisBatchFinished(data), level);
   }
 }
 
-function scheduleNextStarStoneCycle() {
-  clearStarStoneTimer();
-  starStoneTimer = setTimeout(runStarStoneCycle, STAR_STONE_LOOP_INTERVAL_MS);
+async function refreshSynthesisBatchStatus(silent = true) {
+  const res = await api('GET', '/api/flow/synthesis-batch/status').catch(() => null);
+  if (!res?.ok) {
+    if (!silent) showMsg('backpack-msg', res?.error || '读取一键合成状态失败', 'err');
+    return false;
+  }
+  synthesisBatchRunning = !!res.running;
+  updateSynthesisBatchButton();
+  setBackpackSynthesisBatchUiLocked(!!synthesisBatchRunning);
+  return true;
 }
 
-function resetStarStoneLoopProgress() {
-  starStoneLoopCount = 0;
-  starStoneTotalStone = 0;
-  starStoneTotalFragment = 0;
+async function toggleSynthesisBatch() {
+  const isStarting = !synthesisBatchRunning;
+  if (isStarting) {
+    if (!selectedItemId) {
+      showMsg('backpack-msg', '请先选择要一键合成的物品', 'err');
+      return;
+    }
+    clearBackpackFlowLog();
+    const res = await api('POST', '/api/flow/synthesis-batch/start', { item_id: selectedItemId });
+    if (!res?.ok) {
+      showMsg('backpack-msg', res?.error || '启动失败', 'err');
+      await refreshSynthesisBatchStatus(true);
+      return;
+    }
+    appendSynthesisBatchLog(`已启动：${selectedItemId}`, 'ok');
+    showMsg('backpack-msg', '一键合成已启动', 'ok');
+    await refreshSynthesisBatchStatus(true);
+    return;
+  }
+  const res = await api('POST', '/api/flow/synthesis-batch/stop').catch(() => null);
+  if (!res?.ok) {
+    showMsg('backpack-msg', res?.error || '停止失败', 'err');
+    await refreshSynthesisBatchStatus(true);
+    return;
+  }
+  showMsg('backpack-msg', '已请求停止一键合成', 'ok');
+  await refreshSynthesisBatchStatus(true);
 }
 
 function decodePacketText(rawHex) {
@@ -961,18 +1046,16 @@ async function confirmMapNpcSelection() {
 function handleMapNpcListDnPacket(record) {
   const list = record?.map_npc_list;
   if (Array.isArray(list) && list.length) {
-    const first = list[0];
-    currentMapNpcFromPacket = {
-      idHex: String(first.id_hex || '').toLowerCase(),
-      utf8Text: String(first.utf8_text || ''),
-    };
     fillMapNpcSelect(list);
     updateMapNpcFromPacketUi();
     return;
   }
   const m = record?.map_npc;
-  if (!m || !m.id_hex) return;
-  currentMapNpcFromPacket = { idHex: String(m.id_hex), utf8Text: String(m.utf8_text || '') };
+  if (!m || !m.id_hex) {
+    fillMapNpcSelect([]);
+    updateMapNpcFromPacketUi();
+    return;
+  }
   fillMapNpcSelect([{ id_hex: m.id_hex, utf8_text: m.utf8_text || '' }]);
   updateMapNpcFromPacketUi();
 }
@@ -998,106 +1081,32 @@ async function buyByNpcAndItemCode(npcIdHex, itemCodeHex14) {
   });
 }
 
-function parseStarStoneRewards(record) {
-  const text = decodePacketText(record?.raw_hex || '');
-  if (!text || !text.includes('分解装备')) return null;
-  const stone = Number((text.match(/升星(?:基础)?石\*(\d+)/) || [])[1] || 0);
-  const fragment = Number((text.match(/宝石碎片\*(\d+)/) || [])[1] || 0);
-  if (!stone && !fragment) return null;
-  return { stone, fragment, text };
-}
-
-function findStarStoneBuyFavorite() {
-  return buyItemFavorites.find((x) => STAR_STONE_TARGET_NAME_RE.test(x.name || ''));
-}
-
-function findStarStoneDecomposeItem() {
-  return backpackItemsCache.find((x) => STAR_STONE_TARGET_NAME_RE.test(x.name || ''));
-}
-
-function stopStarStoneLoop(reason = '', msgType = 'info') {
-  starStoneLoopRunning = false;
-  starStoneAwaiting = STAR_STONE_PHASE.IDLE;
-  clearStarStoneTimer();
+async function refreshStarStoneStatus(silent = true) {
+  const res = await api('GET', '/api/flow/star-stone/status').catch(() => null);
+  if (!res?.ok) {
+    if (!silent) showMsg('backpack-msg', res?.error || '读取获取升星石状态失败', 'err');
+    return false;
+  }
+  starStoneLoopRunning = !!res.running;
   updateStarStoneButton();
-  if (reason) {
-    appendStarStoneLog(reason, msgType === 'err' ? 'err' : 'ok');
-    showMsg('backpack-msg', reason, msgType);
-  }
+  return true;
 }
 
-async function runStarStoneCycle() {
-  if (!starStoneLoopRunning) return;
-  const favorite = findStarStoneBuyFavorite();
-  if (!favorite) {
-    stopStarStoneLoop('未找到常用购买物品“特步鞋”，请先在购买物品管理中保存', 'err');
+async function toggleStarStoneLoop() {
+  const isStarting = !starStoneLoopRunning;
+  if (isStarting) clearBackpackFlowLog();
+  const endpoint = starStoneLoopRunning
+    ? '/api/flow/star-stone/stop'
+    : '/api/flow/star-stone/start';
+  const actionText = starStoneLoopRunning ? '停止' : '启动';
+  const res = await api('POST', endpoint).catch(() => null);
+  if (!res?.ok) {
+    showMsg('backpack-msg', `获取升星石${actionText}失败：${res?.error || '未知错误'}`, 'err');
+    await refreshStarStoneStatus(true);
     return;
   }
-  starStoneAwaiting = STAR_STONE_PHASE.BUY;
-  let npcId = '';
-  try {
-    npcId = getCurrentBuyNpcId();
-  } catch (err) {
-    stopStarStoneLoop(err?.message || '当前地图 NPC id 未知，已停止', 'err');
-    return;
-  }
-  const res = await buyByNpcAndItemCode(npcId, favorite.code);
-  if (!res.ok) {
-    stopStarStoneLoop(res.error || '购买失败，已停止', 'err');
-    return;
-  }
-  appendStarStoneLog(`第${starStoneLoopCount + 1}轮：已发送购买 ${favorite.name}`, 'info');
-}
-
-async function startStarStoneLoop() {
-  if (starStoneLoopRunning) return;
-  starStoneLoopRunning = true;
-  starStoneAwaiting = STAR_STONE_PHASE.IDLE;
-  resetStarStoneLoopProgress();
-  clearStarStoneTimer();
-  document.getElementById('star-stone-log').innerHTML = '';
-  updateStarStoneButton();
-  appendStarStoneLog('开始执行获取升星石：直接进入循环', 'info');
-  scheduleNextStarStoneCycle();
-}
-
-function toggleStarStoneLoop() {
-  if (starStoneLoopRunning) {
-    stopStarStoneLoop('已手动停止获取升星石', 'info');
-    return;
-  }
-  startStarStoneLoop();
-}
-
-async function handleStarStonePacket(record) {
-  if (!starStoneLoopRunning || record?.direction !== 'DN') return;
-  const fingerprint = String(record?.fingerprint || '');
-  const text = decodePacketText(record.raw_hex || '');
-
-  if (text.includes('包裹已满')) {
-    stopStarStoneLoop('包裹已满，已自动停止', 'err');
-    return;
-  }
-
-  const isBuySuccessPacket = text.includes('购买成功') || fingerprint.includes('e607');
-  if (starStoneAwaiting === STAR_STONE_PHASE.BUY && isBuySuccessPacket) {
-    await handleStarStoneBackpackUpdate();
-    return;
-  }
-
-  if (starStoneAwaiting === STAR_STONE_PHASE.DECOMPOSE) {
-    const rewards = parseStarStoneRewards(record);
-    if (!rewards) return;
-    starStoneLoopCount += 1;
-    starStoneTotalStone += rewards.stone;
-    starStoneTotalFragment += rewards.fragment;
-    appendStarStoneLog(
-      `第${starStoneLoopCount}轮：获得升星石 ${rewards.stone}，获得宝石碎片 ${rewards.fragment}；累计 升星石 ${starStoneTotalStone} / 宝石碎片 ${starStoneTotalFragment}`,
-      'ok'
-    );
-    starStoneAwaiting = STAR_STONE_PHASE.IDLE;
-    scheduleNextStarStoneCycle();
-  }
+  showMsg('backpack-msg', `获取升星石：已请求${actionText}`, 'ok');
+  await refreshStarStoneStatus(true);
 }
 
 // ================================================================== //
@@ -1273,8 +1282,49 @@ function appendBattleLog(data, kind) {
 
 function onControlLog(data) {
   if (!data?.message) return;
+  if (data.scope === 'star_stone') {
+    const kind = data.level === 'err' ? 'err' : data.level === 'ok' ? 'ok' : 'info';
+    appendStarStoneLog(data.message, kind);
+    return;
+  }
+  if (data.scope === 'transport_supply') {
+    const kind = data.level === 'err' ? 'err' : data.level === 'ok' ? 'ok' : 'info';
+    appendTransportSupplyLog(data.message, kind);
+    return;
+  }
+  if (data.scope === 'liaoguo') {
+    const kind = data.level === 'err' ? 'err' : data.level === 'ok' ? 'ok' : 'info';
+    appendLiaoguoLog(data.message, kind);
+    return;
+  }
+  if (data.scope === 'synthesis_batch') {
+    const kind = data.level === 'err' ? 'err' : data.level === 'ok' ? 'ok' : 'info';
+    appendSynthesisBatchLog(data.message, kind);
+    return;
+  }
   const kind = data.level === 'warn' ? 'end' : 'response';
   appendBattleLog({ raw_text: data.message }, kind);
+}
+
+function onFlowStatus(data) {
+  if (!data || typeof data !== 'object') return;
+  if (typeof data.star_stone_running === 'boolean') {
+    starStoneLoopRunning = data.star_stone_running;
+    updateStarStoneButton();
+  }
+  if (typeof data.transport_supply_running === 'boolean') {
+    transportSupplyRunning = data.transport_supply_running;
+    updateTransportSupplyButton();
+  }
+  if (typeof data.liaoguo_running === 'boolean') {
+    liaoguoRunning = data.liaoguo_running;
+    updateLiaoguoButton();
+  }
+  if (typeof data.synthesis_batch_running === 'boolean') {
+    synthesisBatchRunning = data.synthesis_batch_running;
+    updateSynthesisBatchButton();
+    setBackpackSynthesisBatchUiLocked(!!data.synthesis_batch_running);
+  }
 }
 
 function appendBattlePacketLine(record) {
@@ -1302,11 +1352,26 @@ function onBattleEnd(data) {
   appendBattleLog({ raw_text: `第${n}次 战斗结束` }, 'end');
 }
 
+function buildE207SettlementDisplayText(data) {
+  const sum = String(data?.settlement_summary || '').trim();
+  if (sum) return sum;
+  const lines = data?.settlement_lines;
+  if (Array.isArray(lines) && lines.length) return lines.join(' / ');
+  const raw = String(data?.raw_text || '');
+  if (!raw) return '';
+  return raw
+    .split('/')
+    .map((s) => s.trim())
+    .filter((s) => s && !s.includes('自动恢复'))
+    .join(' / ');
+}
+
 function onBattleSettlementE207(data) {
   updateBattleState(data?.battle_state || {});
   const raw = String(data?.raw_text || '');
+  const settlementBody = buildE207SettlementDisplayText(data) || raw;
   if (raw.includes('失去') || data?.outcome === 'defeat') {
-    appendBattleLog({ raw_text: `结算：失败 — ${raw}` }, 'end');
+    appendBattleLog({ raw_text: `结算：失败 — ${settlementBody}` }, 'end');
     return;
   }
   const gCopper = (typeof data?.gold === 'number')
@@ -1321,9 +1386,10 @@ function onBattleSettlementE207(data) {
     const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     appendBattleLog({ raw_text: `【${t}】 第${n}次 战斗结束` }, 'end');
   }
-  appendBattleLog({
-    raw_text: `结算：本次获得经验 ${resultExp} / 金币 ${resultGold}`,
-  }, 'end');
+  const detailLine = settlementBody
+    ? `结算：${settlementBody}`
+    : `结算：本次获得经验 ${resultExp} / 金币 ${resultGold}`;
+  appendBattleLog({ raw_text: detailLine }, 'end');
 }
 
 async function onBattleNotKilled(data) {
@@ -1478,19 +1544,6 @@ function sortPacketsNewestFirst(records) {
     if (tsA !== tsB) return tsB - tsA;
     return Number(b?.id || 0) - Number(a?.id || 0);
   });
-}
-
-async function handleStarStoneBackpackUpdate() {
-  if (!starStoneLoopRunning || starStoneAwaiting !== STAR_STONE_PHASE.BUY) return;
-  const item = findStarStoneDecomposeItem();
-  if (!item) return;
-  starStoneAwaiting = STAR_STONE_PHASE.DECOMPOSE;
-  const res = await api('POST', '/api/item/decompose', { item_id: item.item_id });
-  if (!res.ok) {
-    stopStarStoneLoop(res.error || '分解失败，已停止', 'err');
-    return;
-  }
-  appendStarStoneLog(`第${starStoneLoopCount + 1}轮：已发送分解 ${item.name}`, 'info');
 }
 
 function buildPacketRow(record, collapseCount = 0, openByDefault = false) {
@@ -1844,6 +1897,12 @@ function appendTransportSupplyLog(text, kind = 'info') {
   box.scrollTop = box.scrollHeight;
 }
 
+function clearTransportSupplyLog() {
+  const box = document.getElementById('tool-transport-supply-log');
+  if (!box) return;
+  box.innerHTML = '';
+}
+
 function appendLiaoguoLog(text, kind = 'info') {
   const box = document.getElementById('tool-liaoguo-log');
   if (!box) return;
@@ -1857,46 +1916,10 @@ function appendLiaoguoLog(text, kind = 'info') {
   box.scrollTop = box.scrollHeight;
 }
 
-function clearLiaoguoPacketWaiters(reason = 'stopped') {
-  if (!liaoguoPacketWaiters.length) return;
-  const pending = liaoguoPacketWaiters;
-  liaoguoPacketWaiters = [];
-  pending.forEach((w) => {
-    if (w?.timer) clearTimeout(w.timer);
-    try { w?.resolve?.({ ok: false, reason }); } catch (_) {}
-  });
-}
-
-function notifyLiaoguoPacketWaiters(record) {
-  if (!liaoguoRunning || !record || record.direction !== 'DN') return;
-  const fp = String(record.fingerprint || '').toLowerCase();
-  if (!fp || !liaoguoPacketWaiters.length) return;
-  const pending = [];
-  liaoguoPacketWaiters.forEach((w) => {
-    if (fp.includes(w.targetFp)) {
-      if (w.timer) clearTimeout(w.timer);
-      w.resolve({ ok: true, record });
-    } else {
-      pending.push(w);
-    }
-  });
-  liaoguoPacketWaiters = pending;
-}
-
-function waitForLiaoguoFingerprint(targetFp, timeoutMs = 20000) {
-  const fp = String(targetFp || '').trim().toLowerCase();
-  if (!fp) return Promise.resolve({ ok: false, reason: 'invalid_target' });
-  return new Promise((resolve) => {
-    const waiter = {
-      targetFp: fp,
-      resolve,
-      timer: setTimeout(() => {
-        liaoguoPacketWaiters = liaoguoPacketWaiters.filter((x) => x !== waiter);
-        resolve({ ok: false, reason: 'timeout' });
-      }, Math.max(500, Number(timeoutMs) || 20000)),
-    };
-    liaoguoPacketWaiters.push(waiter);
-  });
+function clearLiaoguoLog() {
+  const box = document.getElementById('tool-liaoguo-log');
+  if (!box) return;
+  box.innerHTML = '';
 }
 
 function updateTransportSupplyButton() {
@@ -2047,474 +2070,68 @@ function getSelectedLiaoguoPair() {
   return liaoguoPairs.find((p) => getLiaoguoPairKey(p) === selectedLiaoguoPairKey) || null;
 }
 
-function getLiaoguoTicketItemCode() {
-  const el = document.getElementById('liaoguo-ticket-item-code');
-  const raw = String(el?.value || '').trim().toLowerCase();
-  if (!raw) {
-    throw new Error('任务券 itemcode 不能为空，请先在辽国映射中配置并保存');
-  }
-  if (!/^[0-9a-f]+$/.test(raw) || raw.length % 2 !== 0 || raw.length < 4 || raw.length > 20) {
-    throw new Error('任务券 itemcode 不合法：需为偶数位 hex');
-  }
-  return raw;
-}
-
-function getLiaoguoAbandonTaskCode() {
-  const el = document.getElementById('liaoguo-abandon-task-code');
-  const raw = String(el?.value || '').trim().toLowerCase();
-  if (!/^[0-9a-f]{4}$/.test(raw)) {
-    throw new Error('放弃任务 code 不合法：需为 4 位 hex');
-  }
-  return raw;
-}
-
-function buildLiaoguoAbandonTaskPacket(abandonTaskCode) {
-  return `18000000e80306000004${randomNumHex4()}f5050304000006000000${abandonTaskCode}07000000`;
-}
-
 function toggleLiaoguoFlow() {
-  if (liaoguoRunning) {
-    liaoguoStopRequested = true;
-    clearLiaoguoPacketWaiters('stopped');
-    if (liaoguoE207Waiter) {
-      const w = liaoguoE207Waiter;
-      liaoguoE207Waiter = null;
-      w.finish({ ok: false, reason: 'stopped' });
-    }
-    appendLiaoguoLog('已请求停止…', 'info');
-    return;
-  }
-  runLiaoguoFlow();
-}
-
-function waitForLiaoguoBattleE207Settlement(timeoutMs = 120000) {
-  return new Promise((resolve) => {
-    const waiter = {
-      t: null,
-      finish(payload) {
-        if (waiter.t) clearTimeout(waiter.t);
-        if (liaoguoE207Waiter === waiter) liaoguoE207Waiter = null;
-        resolve(payload);
-      },
-    };
-    waiter.t = setTimeout(() => waiter.finish({ ok: false, reason: 'timeout' }), timeoutMs);
-    liaoguoE207Waiter = waiter;
-  });
-}
-
-async function runLiaoguoFlow() {
-  if (liaoguoRunning) return;
   const pair = getSelectedLiaoguoPair();
-  if (!pair) {
+  if (!liaoguoRunning && !pair) {
     setToolResult('请先配置辽国映射', 'err');
     return;
   }
-  liaoguoRunning = true;
-  liaoguoStopRequested = false;
-  updateLiaoguoButton();
-  const log = document.getElementById('tool-liaoguo-log');
-  if (log) log.innerHTML = '';
-  appendLiaoguoLog(`开始：${pair.itemCode} - ${pair.label} - ${pair.monsterCode} - ${pair.taskName}`, 'ok');
-  try {
-    const npcId = getCurrentBuyNpcId();
-
-    appendLiaoguoLog(`步骤1/4 兑换任务券（NPC ${npcId}）…`, 'info');
-    const buyRes = await buyByNpcAndItemCode(npcId, pair.itemCode);
-    if (!buyRes?.ok) {
-      appendLiaoguoLog(`兑换任务券失败：${buyRes?.error || '未知错误'}`, 'err');
-      setToolResult(`辽国战斗失败：${buyRes?.error || '兑换任务券失败'}`, 'err');
-      return;
-    }
-    const buyAck = await waitForLiaoguoFingerprint('e8030100e607', 20000);
-    if (liaoguoStopRequested || buyAck.reason === 'stopped') return;
-    if (!buyAck.ok) {
-      appendLiaoguoLog('未在时限内收到购买成功响应 e8030100e607', 'err');
-      setToolResult('辽国战斗失败：未确认购买成功（e607 超时）', 'err');
-      return;
-    }
-    appendLiaoguoLog('已收到购买成功响应 e8030100e607', 'ok');
-    if (liaoguoStopRequested) return;
-
-    const abandonTaskCode = getLiaoguoAbandonTaskCode();
-    const abandonPacketHex = buildLiaoguoAbandonTaskPacket(abandonTaskCode);
-    appendLiaoguoLog(`步骤2/4 放弃任务（code ${abandonTaskCode}）…`, 'info');
-    const abandonRes = await api('POST', '/api/probe/send', { hex: abandonPacketHex, use_queue: true });
-    if (!abandonRes?.ok) {
-      appendLiaoguoLog(`放弃任务失败：${abandonRes?.error || '未知错误'}`, 'err');
-      setToolResult(`辽国战斗失败：${abandonRes?.error || '放弃任务失败'}`, 'err');
-      return;
-    }
-    const abandonAck = await waitForLiaoguoFingerprint('e8030100e807', 20000);
-    if (liaoguoStopRequested || abandonAck.reason === 'stopped') return;
-    if (!abandonAck.ok) {
-      appendLiaoguoLog('未在时限内收到放弃任务响应 e8030100e807', 'err');
-      setToolResult('辽国战斗失败：未确认放弃任务（e807 超时）', 'err');
-      return;
-    }
-    appendLiaoguoLog('已收到放弃任务响应 e8030100e807', 'ok');
-
-    const ticketItemCode = getLiaoguoTicketItemCode();
-    appendLiaoguoLog(`步骤3/4 使用任务券（按任务券 itemcode 发使用物品报文：${ticketItemCode}）…`, 'info');
-    const useRes = await api('POST', '/api/item/use', { item_code: ticketItemCode, quantity: 1 });
-    if (!useRes?.ok) {
-      appendLiaoguoLog(`使用任务券失败：${useRes?.error || '未知错误'}`, 'err');
-      setToolResult(`辽国战斗失败：${useRes?.error || '使用任务券失败'}`, 'err');
-      return;
-    }
-    const useAck = await waitForLiaoguoFingerprint('e8030100ec07', 20000);
-    if (liaoguoStopRequested || useAck.reason === 'stopped') return;
-    if (!useAck.ok) {
-      appendLiaoguoLog('未在时限内收到已接受任务响应 e8030100ec07', 'err');
-      setToolResult('辽国战斗失败：未确认任务已接受（ec07 超时）', 'err');
-      return;
-    }
-    appendLiaoguoLog('已收到已接受任务响应 e8030100ec07', 'ok');
-    if (liaoguoStopRequested) return;
-
-    appendLiaoguoLog(`步骤4/4 辽国战斗（怪物 ${pair.monsterCode}），等待结算 e8030100e207…`, 'info');
-    const battleRes = await api('POST', '/api/battle/start', {
-      monster_code: pair.monsterCode,
-      run_pre_battle_actions: true,
-    });
-    if (!battleRes?.ok) {
-      appendLiaoguoLog(`战斗启动失败：${battleRes?.error || '未知错误'}`, 'err');
-      setToolResult(`辽国战斗失败：${battleRes?.error || '战斗启动失败'}`, 'err');
-      return;
-    }
-    const settle = await waitForLiaoguoBattleE207Settlement(120000);
-    if (liaoguoStopRequested || settle.reason === 'stopped') return;
-    if (!settle.ok) {
-      appendLiaoguoLog('未在时限内收到战斗结算 e8030100e207，请查看战斗面板', 'err');
-      setToolResult('辽国战斗未确认完成（超时）', 'err');
-      return;
-    }
-    appendLiaoguoLog('已收到 e8030100e207，流程完成', 'ok');
-    setToolResult(`辽国战斗完成：${pair.label} (${pair.monsterCode})`, 'ok');
-  } catch (err) {
-    appendLiaoguoLog(`流程异常：${err?.message || '未知错误'}`, 'err');
-    setToolResult(`辽国战斗失败：${err?.message || '未知错误'}`, 'err');
-  } finally {
-    clearLiaoguoPacketWaiters('aborted');
-    if (liaoguoE207Waiter) {
-      const w = liaoguoE207Waiter;
-      liaoguoE207Waiter = null;
-      w.finish({ ok: false, reason: 'aborted' });
-    }
-    liaoguoRunning = false;
-    liaoguoStopRequested = false;
-    updateLiaoguoButton();
-  }
+  runLiaoguoFlow(pair);
 }
 
-function formatTransportSupplyPacketHint(record) {
-  const fp = String(record?.fingerprint || '').toLowerCase();
-  const raw = String(record?.raw_hex || '');
-  const fromDecode = decodePacketText(raw);
-  const parsedTxt = record?.parsed?.utf8_text ? String(record.parsed.utf8_text) : '';
-  const txt = (fromDecode || parsedTxt || '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim().slice(0, 160);
-  return txt ? `fp=${fp} · ${txt}` : `fp=${fp}`;
-}
-
-function isTransportSupplyPurchaseLimit(record) {
-  if (!record || record.direction !== 'DN') return false;
-  const raw = String(record.raw_hex || '');
-  const t = `${decodePacketText(raw)} ${record?.parsed?.utf8_text || ''}`.toLowerCase();
-  return /购买.*上限|已达.*上限|次数.*上限|今日.*上限|无法.*购买|不能再买|购买次数/.test(t);
-}
-
-function isTransportSupplyCompletionPacket(record) {
-  if (!record || record.direction !== 'DN') return false;
-  const fp = String(record.fingerprint || '').toLowerCase();
-  return fp.includes(TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX);
-}
-
-function findTransportSupplyRewardItem() {
-  return backpackItemsCache.find((item) => {
-    const name = String(item?.name || '');
-    const qty = Number(item?.quantity || 0);
-    return qty > 0 && name.includes(TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD);
-  });
-}
-
-async function tryAutoUseTransportSupplyRewardOnce() {
-  const rewardItem = findTransportSupplyRewardItem();
-  if (!rewardItem?.item_id) {
-    return { ok: false, used: false, reason: 'not_found' };
-  }
-  const res = await api('POST', '/api/item/use', { item_id: rewardItem.item_id, quantity: 1 });
+async function refreshLiaoguoStatus(silent = true) {
+  const res = await api('GET', '/api/flow/liaoguo/status').catch(() => null);
   if (!res?.ok) {
-    return { ok: false, used: false, reason: 'use_failed', error: res?.error || '未知错误' };
+    if (!silent) setToolResult(res?.error || '读取辽国战斗状态失败', 'err');
+    return false;
   }
-  return {
-    ok: true,
-    used: true,
-    itemName: String(rewardItem.name || TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD),
-    itemId: String(rewardItem.item_id || ''),
-  };
+  liaoguoRunning = !!res.running;
+  updateLiaoguoButton();
+  return true;
 }
 
-async function waitTransportSupplyWithRewardAutoUse(waitMs, isStopped, round) {
-  const step = 500;
-  const retryIntervalMs = 1200;
-  let left = Math.max(0, waitMs);
-  let rewardRetryLeftMs = 0;
-  let loggedNotFound = false;
-  while (left > 0) {
-    if (isStopped()) return false;
-    if (transportSupplyPendingRewardUses > 0) {
-      if (rewardRetryLeftMs <= 0) {
-        const useRes = await tryAutoUseTransportSupplyRewardOnce();
-        if (useRes.ok && useRes.used) {
-          transportSupplyPendingRewardUses = Math.max(0, transportSupplyPendingRewardUses - 1);
-          loggedNotFound = false;
-          appendTransportSupplyLog(
-            `第 ${round} 轮等待中：已自动使用奖励「${useRes.itemName}」×1（剩余待使用 ${transportSupplyPendingRewardUses}）`,
-            'ok'
-          );
-          rewardRetryLeftMs = 300;
-        } else if (useRes.reason === 'not_found') {
-          if (!loggedNotFound) {
-            appendTransportSupplyLog(`第 ${round} 轮等待中：未在背包找到「${TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD}」，继续等待并重试`, 'info');
-            loggedNotFound = true;
-          }
-          rewardRetryLeftMs = retryIntervalMs;
-        } else {
-          appendTransportSupplyLog(
-            `第 ${round} 轮等待中：自动使用奖励失败（${useRes.error || '未知错误'}），稍后重试`,
-            'err'
-          );
-          rewardRetryLeftMs = retryIntervalMs;
-        }
-      }
-    }
-    const chunk = Math.min(step, left);
-    await new Promise((r) => setTimeout(r, chunk));
-    left -= chunk;
-    rewardRetryLeftMs = Math.max(0, rewardRetryLeftMs - chunk);
-  }
-  return !isStopped();
-}
-
-function clearTransportSupplyWaiter(result) {
-  const w = transportSupplyWaiter;
-  if (!w) return;
-  clearTimeout(w.timer);
-  transportSupplyWaiter = null;
-  w.resolve(result);
-}
-
-function satisfyTransportSupplyWaiter(record) {
-  const w = transportSupplyWaiter;
-  if (!w || w.settled) return;
-  if (!w.predicate(record)) return;
-  w.settled = true;
-  clearTimeout(w.timer);
-  transportSupplyWaiter = null;
-  w.resolve(record);
-}
-
-function waitForTransportSupplyPacket(predicate, timeoutMs) {
-  return new Promise((resolve) => {
-    const state = {
-      predicate,
-      resolve,
-      settled: false,
-      timer: setTimeout(() => {
-        if (transportSupplyWaiter !== state) return;
-        transportSupplyWaiter = null;
-        resolve(null);
-      }, timeoutMs),
-    };
-    transportSupplyWaiter = state;
-  });
-}
-
-function handleTransportSupplyPacket(record) {
-  if (!transportSupplyRunning || !record) return;
-  if (record.direction !== 'DN') return;
-  if (isTransportSupplyPurchaseLimit(record)) {
-    transportSupplyStopRequested = true;
-    appendTransportSupplyLog(`检测到购买达到上限，自动停止。${formatTransportSupplyPacketHint(record)}`, 'err');
-    setToolResult('运输物资：服务器提示购买已达上限，已停止', 'err');
-    clearTransportSupplyWaiter(null);
+async function runLiaoguoFlow(pair) {
+  const isStarting = !liaoguoRunning;
+  if (isStarting) clearLiaoguoLog();
+  const endpoint = liaoguoRunning ? '/api/flow/liaoguo/stop' : '/api/flow/liaoguo/start';
+  const actionText = liaoguoRunning ? '停止' : '启动';
+  const body = liaoguoRunning ? {} : { ...(pair || {}) };
+  const res = await api('POST', endpoint, body).catch(() => null);
+  if (!res?.ok) {
+    setToolResult(`辽国战斗${actionText}失败：${res?.error || '未知错误'}`, 'err');
+    await refreshLiaoguoStatus(true);
     return;
   }
-  satisfyTransportSupplyWaiter(record);
+  setToolResult(`辽国战斗：已请求${actionText}`, 'ok');
+  await refreshLiaoguoStatus(true);
 }
 
-async function sleepInterruptible(ms, isStopped) {
-  const step = 500;
-  let left = Math.max(0, ms);
-  while (left > 0) {
-    if (isStopped()) return false;
-    const chunk = Math.min(step, left);
-    await new Promise((r) => setTimeout(r, chunk));
-    left -= chunk;
+async function refreshTransportSupplyStatus(silent = true) {
+  const res = await api('GET', '/api/flow/transport-supply/status').catch(() => null);
+  if (!res?.ok) {
+    if (!silent) setToolResult(res?.error || '读取运输物资状态失败', 'err');
+    return false;
   }
-  return !isStopped();
-}
-
-async function sendProbeHexQuiet(hex) {
-  const cleanHex = String(hex || '').replace(/\s+/g, '').toLowerCase();
-  if (!cleanHex || cleanHex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(cleanHex)) {
-    return { ok: false, error: '报文 hex 无效' };
-  }
-  return api('POST', '/api/probe/send', { hex: cleanHex, use_queue: true });
-}
-
-async function waitTransportSupplyCompletionWithRetry(deliverHex, isStopped, round, npcId) {
-  const waitPromise = waitForTransportSupplyPacket(
-    (rec) => isTransportSupplyCompletionPacket(rec),
-    TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS
-  );
-  const firstSendRes = await sendProbeHexQuiet(deliverHex);
-  if (!firstSendRes.ok) {
-    clearTransportSupplyWaiter(null);
-    return { ok: false, reason: 'send_failed', error: firstSendRes.error || '未知错误' };
-  }
-
-  const deadlineTs = Date.now() + TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS;
-  while (true) {
-    const remainMs = Math.max(0, deadlineTs - Date.now());
-    const stepMs = Math.min(TRANSPORT_SUPPLY_DELIVER_RETRY_INTERVAL_MS, remainMs);
-    if (stepMs <= 0) break;
-
-    const raceRes = await Promise.race([
-      waitPromise.then((record) => ({ type: 'done', record })),
-      sleepInterruptible(stepMs, isStopped).then((ok) => ({ type: 'tick', ok })),
-    ]);
-    if (raceRes.type === 'done') {
-      return { ok: !!raceRes.record, record: raceRes.record || null, reason: raceRes.record ? '' : 'timeout' };
-    }
-    if (!raceRes.ok || isStopped()) {
-      clearTransportSupplyWaiter(null);
-      return { ok: false, reason: 'stopped' };
-    }
-
-    appendTransportSupplyLog(
-      `第 ${round} 轮：未收到完成下行，5 秒后重发交付（NPC ${npcId}）…`,
-      'info'
-    );
-    const retryRes = await sendProbeHexQuiet(deliverHex);
-    if (!retryRes.ok) {
-      clearTransportSupplyWaiter(null);
-      return { ok: false, reason: 'send_failed', error: retryRes.error || '未知错误' };
-    }
-  }
-
-  clearTransportSupplyWaiter(null);
-  const finalRec = await waitPromise;
-  return { ok: !!finalRec, record: finalRec || null, reason: finalRec ? '' : 'timeout' };
-}
-
-function toggleTransportSupplyFlow() {
-  if (transportSupplyRunning) {
-    transportSupplyStopRequested = true;
-    appendTransportSupplyLog('已请求停止…', 'info');
-    return;
-  }
-  runTransportSupplyFlow();
-}
-
-async function runTransportSupplyFlow() {
-  if (transportSupplyRunning) return;
-  transportSupplyRunning = true;
-  transportSupplyStopRequested = false;
-  transportSupplyPendingRewardUses = 0;
+  transportSupplyRunning = !!res.running;
   updateTransportSupplyButton();
-  const log = document.getElementById('tool-transport-supply-log');
-  if (log) log.innerHTML = '';
-  appendTransportSupplyLog('运输物资流程已启动（最多 10 轮）', 'ok');
+  return true;
+}
 
-  const isStopped = () => transportSupplyStopRequested;
-
-  try {
-    for (let round = 1; round <= TRANSPORT_SUPPLY_MAX_ROUNDS; round++) {
-      if (isStopped()) break;
-
-      const npcId = getTransportSupplyNpcIdHexForPacket();
-      if (!npcId) {
-        appendTransportSupplyLog('缺少当前地图 NPC id（需先收到地图 NPC 列表下行包），已中止', 'err');
-        setToolResult('运输物资：请先在游戏内触发地图 NPC 列表，待界面显示当前 NPC 后再开始', 'err');
-        break;
-      }
-
-      appendTransportSupplyLog(`第 ${round} 轮：发送购买物资（NPC ${npcId}）…`, 'info');
-      const buyRes = await buyByNpcAndItemCode(npcId, TRANSPORT_SUPPLY_BUY_ITEM_CODE);
-      if (!buyRes.ok) {
-        appendTransportSupplyLog(`购买发送失败：${buyRes.error || '未知错误'}`, 'err');
-        setToolResult(`运输物资：购买失败 — ${buyRes.error || '未知错误'}`, 'err');
-        break;
-      }
-      await sleepInterruptible(800, isStopped);
-      if (isStopped()) break;
-
-      appendTransportSupplyLog('等待 65 秒后交付物资…（期间自动使用上一轮奖励）', 'info');
-      const waited = await waitTransportSupplyWithRewardAutoUse(65000, isStopped, round);
-      if (!waited || isStopped()) {
-        appendTransportSupplyLog('已停止（等待交付阶段中断）', 'info');
-        break;
-      }
-
-      const deliverHex = TRANSPORT_SUPPLY_DELIVER_TEMPLATE
-        .replace(TRANSPORT_SUPPLY_NPC_ID_PLACEHOLDER, npcId)
-        .replace('cea8', randomNumHex4());
-      appendTransportSupplyLog(`发送交付物资（NPC ${npcId}）…`, 'info');
-      const deliverWaitRes = await waitTransportSupplyCompletionWithRetry(deliverHex, isStopped, round, npcId);
-      if (isStopped()) {
-        appendTransportSupplyLog('已停止', 'info');
-        break;
-      }
-      if (!deliverWaitRes.ok && deliverWaitRes.reason === 'send_failed') {
-        appendTransportSupplyLog(`交付发送失败：${deliverWaitRes.error || '未知错误'}`, 'err');
-        setToolResult(`运输物资：交付失败 — ${deliverWaitRes.error || '未知错误'}`, 'err');
-        break;
-      }
-      const doneRec = deliverWaitRes.record || null;
-      if (!doneRec) {
-        appendTransportSupplyLog(
-          `第 ${round} 轮：等待完成响应超时（${TRANSPORT_SUPPLY_POST_DELIVER_WAIT_MS / 1000}s 内未收到含 ${TRANSPORT_SUPPLY_COMPLETION_FP_PREFIX} 的下行指纹）`,
-          'err'
-        );
-        setToolResult('运输物资：等待完成响应超时', 'err');
-        break;
-      }
-
-      const summary = formatTransportSupplyPacketHint(doneRec);
-      appendTransportSupplyLog(`第 ${round} 轮：完成。${summary}`, 'ok');
-      setToolResult(`运输物资 第 ${round} 轮完成：${summary}`, 'ok');
-      transportSupplyPendingRewardUses += 1;
-      const isLastRound = round >= TRANSPORT_SUPPLY_MAX_ROUNDS;
-      if (isLastRound) {
-        appendTransportSupplyLog('最后一轮完成：立即自动使用奖励…', 'info');
-        const useRes = await tryAutoUseTransportSupplyRewardOnce();
-        if (useRes.ok && useRes.used) {
-          transportSupplyPendingRewardUses = Math.max(0, transportSupplyPendingRewardUses - 1);
-          appendTransportSupplyLog(`最后一轮奖励已自动使用：${useRes.itemName}×1`, 'ok');
-        } else if (useRes.reason === 'not_found') {
-          appendTransportSupplyLog(`最后一轮未在背包找到「${TRANSPORT_SUPPLY_REWARD_NAME_KEYWORD}」，请稍后手动确认`, 'err');
-        } else {
-          appendTransportSupplyLog(`最后一轮自动使用奖励失败：${useRes.error || '未知错误'}`, 'err');
-        }
-      } else {
-        appendTransportSupplyLog(`第 ${round} 轮奖励入队：下一轮等待阶段自动使用（待使用 ${transportSupplyPendingRewardUses}）`, 'info');
-      }
-    }
-
-    if (!transportSupplyStopRequested) {
-      if (transportSupplyPendingRewardUses > 0) {
-        appendTransportSupplyLog(`流程结束：仍有 ${transportSupplyPendingRewardUses} 张奖励票未自动使用`, 'err');
-      } else {
-        appendTransportSupplyLog('流程结束（已达最大轮数或未触发提前停止）', 'info');
-      }
-    }
-  } finally {
-    transportSupplyRunning = false;
-    transportSupplyStopRequested = false;
-    transportSupplyPendingRewardUses = 0;
-    if (transportSupplyWaiter) clearTransportSupplyWaiter(null);
-    updateTransportSupplyButton();
+async function toggleTransportSupplyFlow() {
+  const isStarting = !transportSupplyRunning;
+  if (isStarting) clearTransportSupplyLog();
+  const endpoint = transportSupplyRunning
+    ? '/api/flow/transport-supply/stop'
+    : '/api/flow/transport-supply/start';
+  const actionText = transportSupplyRunning ? '停止' : '启动';
+  const res = await api('POST', endpoint).catch(() => null);
+  if (!res?.ok) {
+    setToolResult(`运输物资：${actionText}失败 — ${res?.error || '未知错误'}`, 'err');
+    await refreshTransportSupplyStatus(true);
+    return;
   }
+  setToolResult(`运输物资：已请求${actionText}`, 'ok');
+  await refreshTransportSupplyStatus(true);
 }
 
 async function loadToolTeleportOptions() {
@@ -2780,7 +2397,10 @@ function toggleCollapseMode() {
   await loadLiaoguoPairs();
   const liaoguoSel = document.getElementById('liaoguo-pair-select');
   if (liaoguoSel) liaoguoSel.addEventListener('change', onLiaoguoPairSelectChange);
-  updateLiaoguoButton();
+  await refreshStarStoneStatus(true);
+  await refreshSynthesisBatchStatus(true);
+  await refreshLiaoguoStatus(true);
+  await refreshTransportSupplyStatus(true);
   await loadToolTeleportOptions();
   updateBattleStatsText();
 })();
