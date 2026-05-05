@@ -35,6 +35,10 @@ const TELEPORT_PACKET_TEMPLATE = '18000000e80303004428{random_num}f5054728000006
 const DAILY_CHECKIN_TEMPLATE = '20000000e80313007d2e08f4f505882e00000e0000000c00636865636b496e446f3f7b7d';
 /** 当前地图 NPC：由后端 Python 解析后随 SSE packet.map_npc 下发 */
 let currentMapNpcFromPacket = { idHex: '38900d00', utf8Text: '通用NPC' };
+const DEFAULT_MAP_NPC = Object.freeze({
+  id_hex: '38900d00',
+  utf8_text: '通用NPC',
+});
 
 // ================================================================== //
 //  工具函数                                                            //
@@ -238,6 +242,14 @@ function renderTopbarStatus(data) {
 function updateStatus(data) {
   const wasConnected = !!prevConnected;
   lastStatusData = { ...lastStatusData, ...(data || {}) };
+  const statusMapNpc = data?.current_map_npc;
+  if (statusMapNpc && statusMapNpc.id_hex) {
+    currentMapNpcFromPacket = {
+      idHex: String(statusMapNpc.id_hex || '').trim().toLowerCase(),
+      utf8Text: String(statusMapNpc.utf8_text || '').trim(),
+    };
+  }
+  updateMapNpcFromPacketUi();
   const d = data?.default_battle_loop_delay_ms;
   if (Number.isFinite(Number(d)) && Number(d) >= 0) {
     serverDefaultBattleLoopDelayMs = Math.floor(Number(d));
@@ -252,13 +264,6 @@ function updateStatus(data) {
     const sc = document.getElementById('stats-content');
     if (sc) sc.innerHTML = '<span class="text-muted">等待数据...</span>';
   }
-  if (wasConnected && !isConnected) {
-    clearPacketList();
-    api('DELETE', '/api/packets')
-      .then(() => loadPackets())
-      .catch(() => {});
-  }
-
   if (isConnected) {
     // 加载角色属性（先拉取，可能为空；renderRoleStats 会铺完整骨架并用报文逐步填充）
     api('GET', '/api/role-stats').then(r => { if (r.ok) renderRoleStats(r); });
@@ -985,11 +990,6 @@ function updateMapNpcFromPacketUi() {
   el.textContent = `${name}${idHex}`;
 }
 
-const DEFAULT_MAP_NPC = Object.freeze({
-  id_hex: '38900d00',
-  utf8_text: '通用NPC',
-});
-
 function buildMapNpcOptions(list) {
   const merged = [DEFAULT_MAP_NPC];
   const seen = new Set([DEFAULT_MAP_NPC.id_hex]);
@@ -1043,6 +1043,14 @@ async function confirmMapNpcSelection() {
   showMsg('tool-send-result', `已设为当前地图 NPC：${utf8Text ? `${utf8Text} · ` : ''}${idHex}`, 'ok');
 }
 
+async function ensureDefaultMapNpcSelection() {
+  const idHex = String(currentMapNpcFromPacket.idHex || '').trim().toLowerCase() || DEFAULT_MAP_NPC.id_hex;
+  const utf8Text = String(currentMapNpcFromPacket.utf8Text || '').trim() || DEFAULT_MAP_NPC.utf8_text;
+  currentMapNpcFromPacket = { idHex, utf8Text };
+  updateMapNpcFromPacketUi();
+  await api('POST', '/api/map-npc/current', { id_hex: idHex, utf8_text: utf8Text }).catch(() => null);
+}
+
 function handleMapNpcListDnPacket(record) {
   const list = record?.map_npc_list;
   if (Array.isArray(list) && list.length) {
@@ -1052,8 +1060,7 @@ function handleMapNpcListDnPacket(record) {
   }
   const m = record?.map_npc;
   if (!m || !m.id_hex) {
-    fillMapNpcSelect([]);
-    updateMapNpcFromPacketUi();
+    // 非地图 NPC 报文：不覆盖当前下拉选项，避免被普通报文重置成仅默认值
     return;
   }
   fillMapNpcSelect([{ id_hex: m.id_hex, utf8_text: m.utf8_text || '' }]);
@@ -1362,7 +1369,7 @@ function buildE207SettlementDisplayText(data) {
   return raw
     .split('/')
     .map((s) => s.trim())
-    .filter((s) => s && !s.includes('自动恢复'))
+    .filter((s) => s)
     .join(' / ');
 }
 
@@ -1737,7 +1744,6 @@ async function loadPackets() {
 
 function syncMapNpcFromPacketHistory(records) {
   if (!Array.isArray(records) || !records.length) {
-    fillMapNpcSelect([]);
     return;
   }
   const latestNpcRecord = records.find((record) => {
@@ -1745,7 +1751,6 @@ function syncMapNpcFromPacketHistory(records) {
     return (Array.isArray(record.map_npc_list) && record.map_npc_list.length > 0) || !!record.map_npc;
   });
   if (!latestNpcRecord) {
-    fillMapNpcSelect([]);
     return;
   }
   handleMapNpcListDnPacket(latestNpcRecord);
@@ -2349,6 +2354,7 @@ function toggleCollapseMode() {
 // ================================================================== //
 (async function init() {
   startSSE();
+  await ensureDefaultMapNpcSelection();
 
   // ---- 恢复"自动重连"勾选状态（localStorage 持久化） ----
   const chkAR = document.getElementById('chk-auto-reconnect');

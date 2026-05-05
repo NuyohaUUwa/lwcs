@@ -3,7 +3,7 @@
 1) 客户端发起战斗（f603）
 2) 服务端状态机驱动后续战斗（f703）
 3) 解析服务器战斗响应（de07，仅推进回合，不以 de07 判定战斗结束）
-4) 解析 df07：进行中（嵌 e207 片段）则继续发 f703；内力不足则停止；「战斗已结束」则对当前怪物重发 f603 重新开战（胜负仍以 e207 为准）
+4) 解析 df07：进行中（嵌 e207 片段）则继续发 f703；内力不足则停止；「战斗已结束」仅作提示，胜负以 e207 为准
 5) 解析 e8030100e207：根据「获得」「失去」判定胜负并结束本回合；胜则循环下一轮，败则停
 """
 
@@ -42,6 +42,7 @@ BATTLE_WAIT_TIMEOUT_GRACE_S = 0.5
 # 战斗 de07 下行全包 hex 需包含此子串才视为目标响应，并清零 f703 超时补发计数
 BATTLE_DE07_HEX_MARK = "030100de07"
 MAX_F703_TIMEOUT_RECOVER = 3
+MAX_DF07_BATTLE_ENDED_NOTICE = 3
 
 
 def _load_default_monsters() -> list:
@@ -303,6 +304,17 @@ def _decode_utf8_text(packet_hex: str) -> str:
     return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text).strip()
 
 
+def _strip_e207_leading_binary_noise(text: str) -> str:
+    """e207 正文前常有协议残留字节，解码为少量 ASCII（如 `y）；从首个「获得」或「失去」起截断以便展示与解析。"""
+    t = (text or "").strip()
+    hits = [t.find(kw) for kw in ("获得", "失去")]
+    idxs = [i for i in hits if i >= 0]
+    if not idxs:
+        return t
+    i = min(idxs)
+    return t[i:] if i > 0 else t
+
+
 def _parse_gold_to_copper(text: str):
     """
     将「获得金币」后的片段解析为总铜数。
@@ -337,20 +349,11 @@ def _parse_gold_to_copper(text: str):
 
 
 def _e207_settlement_lines_excluding_auto_recover(text: str) -> list[str]:
-    """
-    e207 结算正文常按「/」分段；去掉含「自动恢复」的片段（血/内力回复与剩余量），保留经验、金币、掉落等。
-    """
+    """e207 结算正文按「/」分段，保留全部片段。"""
     t = (text or "").strip()
     if not t:
         return []
-    parts = [p.strip() for p in re.split(r"\s*/\s*", t) if p.strip()]
-    filtered = [p for p in parts if "自动恢复" not in p]
-    if filtered:
-        return filtered
-    if "/" not in t and "自动恢复" in t:
-        head = t.split("自动恢复", 1)[0].strip().rstrip("/").strip()
-        return [head] if head else []
-    return parts
+    return [p.strip() for p in re.split(r"\s*/\s*", t) if p.strip()]
 
 
 def _e207_settlement_display_bundle(text: str) -> tuple[list[str], str]:
@@ -378,6 +381,7 @@ def _build_battle_state_snapshot(session) -> Dict[str, Any]:
         "total_exp": session.battle_total_exp,
         "total_gold_copper": session.battle_total_gold_copper,
         "f703_timeout_recover_count": session.battle_f703_timeout_recover_count,
+        "battle_ended_notice_count": session.battle_ended_notice_count,
     }
 
 
@@ -737,6 +741,7 @@ def mark_battle_started(monster_code: str):
     with session._lock:
         session.role_stats_full_refresh_on_next_ed07 = False
         session.battle_f703_timeout_recover_count = 0
+        session.battle_ended_notice_count = 0
         next_round = session.battle_round_seq + 1
         if not session.battle_current_monster:
             session.battle_current_monster = monster_code
@@ -758,6 +763,7 @@ def mark_battle_error(reason: str):
     session = get_session()
     with session._lock:
         session.battle_f703_timeout_recover_count = 0
+        session.battle_ended_notice_count = 0
     _set_battle_state(
         state=BATTLE_STATE_ERROR,
         in_progress=False,
@@ -788,6 +794,7 @@ def reset_battle_state(*, preserve_loop: bool = False):
         session.battle_total_gold_copper = total_gold
         session.battle_next_start_ts = 0.0
         session.battle_f703_timeout_recover_count = 0
+        session.battle_ended_notice_count = 0
     _set_battle_state(
         state=BATTLE_STATE_IDLE,
         in_progress=False,
@@ -831,35 +838,6 @@ def _send_next_f703(source: str) -> Dict[str, Any]:
         next_start_ts=0.0,
     )
     return {"ok": True, **built, "source": source}
-
-
-def _restart_battle_with_f603(source: str) -> Dict[str, Any]:
-    """df07 提示「战斗已结束」时，用当前怪物代码重新入队 f603。"""
-    from game_test.backend.runtime.actions import send_raw_action
-
-    session = get_session()
-    with session._lock:
-        monster_code = (
-            (session.battle_current_monster or session.battle_loop_monster_code or "").strip().lower()
-        )
-    if len(monster_code) != 4:
-        _emit_control_log("df07 战斗已结束：缺少 4 位怪物代码，无法重发 f603", level="warn", scope="battle")
-        return {"ok": False, "error": "缺少怪物代码，无法重发 f603", "source": source}
-
-    try:
-        built = build_start_battle_packet(monster_code)
-    except ValueError as e:
-        mark_battle_error(str(e))
-        return {"ok": False, "error": str(e), "source": source}
-
-    res = send_raw_action(built["packet_hex"], priority=10, use_queue=True)
-    if not res.get("ok"):
-        mark_battle_error(res.get("error", "重发 f603 失败"))
-        return {**res, "source": source}
-
-    mark_battle_started(built["monster_code"])
-    _emit_control_log("df07 含「战斗已结束」，已重发 f603 重新开战", scope="battle")
-    return {"ok": True, **built, "source": source, "restart": "f603"}
 
 
 def recover_battle_wait_timeout_with_f703() -> Dict[str, Any]:
@@ -949,6 +927,8 @@ def parse_battle_response(packet_hex: str) -> Dict[str, Any]:
     )
 
     now = time.time()
+    with session._lock:
+        session.battle_ended_notice_count = 0
 
     if prev_state == BATTLE_STATE_WAITING_START_RESPONSE:
         _set_battle_state(
@@ -993,7 +973,7 @@ def _mark_role_stats_full_refresh_on_next_ed07() -> None:
 
 
 def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
-    """解析 df07：进行中（继续 f703）、内力不足（停战）、战斗已结束（等待开战态下重发 f603）。"""
+    """解析 df07：三类——进行中（继续 f703）、内力不足（停战）、战斗已结束（仅提示，胜负看 e207）。"""
     session = get_session()
     packet_hex_l = packet_hex.lower()
     payload = _base_battle_payload(packet_hex)
@@ -1001,6 +981,16 @@ def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
     no_energy = _NEILI_NOT_ENOUGH_HEX_TOKEN in packet_hex_l or "内力不足" in text
     battle_ended_notice = _BATTLE_ENDED_HEX_TOKEN in packet_hex_l or "战斗已结束" in text
     battle_pending = _DF07_BODY_BATTLE_CONTINUES in packet_hex_l and not no_energy and not battle_ended_notice
+
+    notice_count = 0
+    reached_notice_threshold = False
+    with session._lock:
+        if battle_ended_notice:
+            session.battle_ended_notice_count = int(session.battle_ended_notice_count or 0) + 1
+            notice_count = session.battle_ended_notice_count
+            reached_notice_threshold = notice_count >= MAX_DF07_BATTLE_ENDED_NOTICE
+        else:
+            session.battle_ended_notice_count = 0
 
     stats_updated = update_session_stats(packet_hex)
     if no_energy:
@@ -1010,10 +1000,10 @@ def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
         should_continue = False
         end_reason = "no_energy"
     elif battle_ended_notice:
-        df07_kind = "battle_already_ended_notice"
-        is_end_confirmed = False
+        df07_kind = "battle_already_ended_notice_threshold" if reached_notice_threshold else "battle_already_ended_notice"
+        is_end_confirmed = reached_notice_threshold
         should_continue = False
-        end_reason = "battle_already_ended_notice"
+        end_reason = "battle_already_ended_notice_threshold" if reached_notice_threshold else "battle_already_ended_notice"
     elif battle_pending:
         df07_kind = "battle_pending"
         is_end_confirmed = False
@@ -1036,6 +1026,8 @@ def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
             "is_end_confirmed": is_end_confirmed,
             "end_reason": end_reason,
             "should_continue": should_continue,
+            "battle_ended_notice_count": notice_count,
+            "battle_ended_notice_threshold": MAX_DF07_BATTLE_ENDED_NOTICE,
             "packet_type": "df07",
         }
     )
@@ -1058,21 +1050,33 @@ def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
         )
         _emit_battle_state_with_payload("battle_end", payload)
     elif battle_ended_notice:
-        _set_battle_state(
-            state=BATTLE_STATE_WAITING_ACTION_RESULT if prev_state == BATTLE_STATE_WAITING_ACTION_RESULT else prev_state,
-            in_progress=prev_state == BATTLE_STATE_WAITING_ACTION_RESULT,
-            last_action="df07",
-            can_create_next=False,
-            last_response_ts=now,
-            round_seq=prev_round,
-            last_result=payload,
-            wait_deadline_ts=0.0,
-        )
-        _emit_battle_state_with_payload("battle_not_killed", payload)
-        payload["should_restart_f603"] = prev_state in (
-            BATTLE_STATE_WAITING_ACTION_RESULT,
-            BATTLE_STATE_WAITING_START_RESPONSE,
-        )
+        if reached_notice_threshold:
+            with session._lock:
+                session.battle_ended_notice_count = 0
+            _set_battle_state(
+                state=BATTLE_STATE_ENDED,
+                in_progress=False,
+                last_action="df07",
+                can_create_next=False,
+                last_response_ts=now,
+                round_seq=prev_round,
+                last_result=payload,
+                wait_deadline_ts=0.0,
+                next_start_ts=0.0,
+            )
+            _emit_battle_state_with_payload("battle_end", payload)
+        else:
+            _set_battle_state(
+                state=BATTLE_STATE_WAITING_ACTION_RESULT if prev_state == BATTLE_STATE_WAITING_ACTION_RESULT else prev_state,
+                in_progress=prev_state == BATTLE_STATE_WAITING_ACTION_RESULT,
+                last_action="df07",
+                can_create_next=False,
+                last_response_ts=now,
+                round_seq=prev_round,
+                last_result=payload,
+                wait_deadline_ts=0.0,
+            )
+            _emit_battle_state_with_payload("battle_not_killed", payload)
     else:
         can_next = bool(battle_pending and prev_state == BATTLE_STATE_WAITING_ACTION_RESULT)
         _set_battle_state(
@@ -1092,7 +1096,7 @@ def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
 def handle_battle_settlement_e207(packet_hex: str) -> Dict[str, Any]:
     """e8030100e207：按正文「失去」「获得」判定败/胜；仅胜场累计 battle_total_count 与经验金币。"""
     session = get_session()
-    text = _decode_utf8_text(packet_hex)
+    text = _strip_e207_leading_binary_noise(_decode_utf8_text(packet_hex))
     exp_match = re.search(r"(?:获得)?经验[：:+\s]*([0-9]+)", text)
     exp = int(exp_match.group(1)) if exp_match else None
     gold = _parse_gold_to_copper(text)
@@ -1144,6 +1148,7 @@ def handle_battle_settlement_e207(packet_hex: str) -> Dict[str, Any]:
     now = time.time()
     with session._lock:
         session.battle_f703_timeout_recover_count = 0
+        session.battle_ended_notice_count = 0
         if outcome == "victory":
             session.battle_total_count += 1
             if isinstance(exp, int):
@@ -1206,9 +1211,7 @@ def handle_battle_server_packet(packet_hex: str) -> Dict[str, Any]:
 
     auto_sent = None
     state = get_battle_state_snapshot().get("state")
-    if payload.get("should_restart_f603"):
-        auto_sent = _restart_battle_with_f603(str(payload.get("packet_type", "df07")))
-    elif payload.get("should_continue") and state == BATTLE_STATE_WAITING_ACTION_RESULT:
+    if payload.get("should_continue") and state == BATTLE_STATE_WAITING_ACTION_RESULT:
         auto_sent = _send_next_f703(payload.get("packet_type", ""))
     elif payload.get("is_end_confirmed"):
         defeatish = (
