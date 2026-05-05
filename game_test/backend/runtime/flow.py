@@ -40,7 +40,7 @@ from game_test.backend.domain.roles.roles import (
 )
 from game_test.backend.infrastructure.config import GAME_SERVERS, LOGIN_SERVERS, RECV_BUFSIZE
 from game_test.backend.runtime import RoleInfo, get_session
-from game_test.core.codec import split_game_frame_bytes
+from game_test.core.codec import extract_utf8_segments, split_game_frame_bytes
 from game_test.core.connector import (
     connect_and_exchange,
     open_connection_and_send_receive_once,
@@ -406,6 +406,10 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
     hex_str = raw_bytes.hex()
     session.last_recv_ts = time.time()
     fingerprint = hex_str[8:20] if len(hex_str) >= 20 else ""
+    # 对背包相关报文提取可读文本，用于“得到/获得→乐观增量”推断。
+    utf8_text: str | None = None
+    if "ed07" in fingerprint or "e607" in fingerprint or "ec07" in fingerprint:
+        utf8_text = extract_utf8_segments(hex_str)
     if _is_banned_role_packet(hex_str):
         _handle_banned_role_packet()
         return
@@ -420,11 +424,11 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
                 session.notify_synthesis_result(parsed)
         return
     if "d607" in fingerprint:
-        dispatch_backpack_packet(hex_str)
+        dispatch_backpack_packet(hex_str, utf8_text=None)
         update_session_stats(hex_str)
         return
     if "ed07" in fingerprint:
-        dispatch_backpack_packet(hex_str)
+        dispatch_backpack_packet(hex_str, utf8_text=utf8_text)
         with session._lock:
             full_next = session.role_stats_full_refresh_on_next_ed07
         if full_next:
@@ -438,7 +442,7 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
     if "e207" in fingerprint or "de07" in fingerprint or "df07" in fingerprint:
         handle_battle_server_packet(hex_str)
         return
-    dispatch_backpack_packet(hex_str)
+    dispatch_backpack_packet(hex_str, utf8_text=utf8_text)
 
 
 def handle_incoming_packet(raw_bytes: bytes, *, already_framed: bool = False) -> None:

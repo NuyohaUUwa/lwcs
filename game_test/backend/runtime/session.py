@@ -127,21 +127,43 @@ class GameSession:
         with self._lock:
             self.backpack_items = dict(items)
 
-    def apply_optimistic_obtain_items(self, items: Iterable[Item]) -> bool:
+    def apply_optimistic_obtain_items(self, items: Iterable[Item], *, delta_sign: int = 1) -> bool:
         """
-        ec07 / ed07 / e607 等乐观合并：数量>0 时可 upsert（含从零新增）；
-        数量<=0 时不新增，若已有该 item_id 则移除。
+        乐观背包增减（非 d607 场景）。
+
+        规则：
+        - `delta_sign=+1`：把 `item.quantity` 当作“获得数量”，对当前背包数量做累加
+        - `delta_sign=-1`：把 `item.quantity` 当作“失去数量”，对当前背包数量做扣减；扣到 <=0 则移除
+
+        只有 d607（权威全量列表）才会通过 `replace_backpack_items` 覆盖整个背包。
         """
+        delta_sign = 1 if delta_sign >= 0 else -1
         changed = False
         with self._lock:
             for item in items:
-                if item.quantity <= 0:
-                    if item.item_id in self.backpack_items:
-                        del self.backpack_items[item.item_id]
-                        changed = True
+                # 数量字段来自报文解析，理论上是“增减幅度”的无符号值；这里按 delta_sign 转成增减。
+                delta_mag = int(item.quantity or 0)
+                if delta_mag == 0:
                     continue
-                self.backpack_items[item.item_id] = item
-                changed = True
+
+                if delta_sign > 0:
+                    existing = self.backpack_items.get(item.item_id)
+                    if existing:
+                        existing.quantity += delta_mag
+                    else:
+                        item.quantity = delta_mag
+                        self.backpack_items[item.item_id] = item
+                    changed = True
+                else:
+                    existing = self.backpack_items.get(item.item_id)
+                    if not existing:
+                        continue
+                    new_qty = existing.quantity - delta_mag
+                    if new_qty > 0:
+                        existing.quantity = new_qty
+                    else:
+                        del self.backpack_items[item.item_id]
+                    changed = True
         return changed
 
     def remove_item(self, item_id: str):
