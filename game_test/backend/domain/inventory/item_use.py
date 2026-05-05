@@ -2,6 +2,7 @@
 
 # pyright: reportImportCycles=false, reportMissingTypeArgument=false
 
+from game_test.backend.infrastructure.config import DEFAULT_MAP_NPC_ID_HEX
 from game_test.backend.runtime import get_session
 from game_test.utils.random_num import random_num_hex4, random_num_hex6
 
@@ -110,13 +111,8 @@ def build_buy_item_packet(npc_id: str, item_code: str) -> str:
 
 
 def get_current_map_npc_id() -> str:
-    """读取会话中的当前地图 NPC id（8 位 hex）。"""
-    session = get_session()
-    with session._lock:
-        npc_id = (session.current_map_npc_id_hex or "").strip().lower()
-    if len(npc_id) != 8:
-        raise ValueError("当前地图 NPC id 未知，请先进入地图并等待 NPC 列表下行包（e803…4d4f/db07）")
-    return _normalize_hex(npc_id, 8, "npc_id")
+    """读取默认地图 NPC id（仅使用 config 默认值）。"""
+    return _normalize_hex(DEFAULT_MAP_NPC_ID_HEX, 8, "npc_id")
 
 
 def pick_decompose_targets(protected_items: list | None = None) -> tuple[list, list]:

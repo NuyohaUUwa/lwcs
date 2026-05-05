@@ -5,7 +5,11 @@ import threading
 import time
 from typing import Any
 
-from game_test.backend.domain.inventory.item_use import build_synthesize_packet, normalize_backpack_item_id_12
+from game_test.backend.domain.inventory.item_use import (
+    build_synthesize_packet,
+    get_current_map_npc_id,
+    normalize_backpack_item_id_12,
+)
 from game_test.backend.runtime import get_session
 from game_test.backend.runtime.actions import send_action, send_raw_action
 
@@ -135,14 +139,7 @@ def _run_star_stone_loop() -> None:
             _stop_star_stone_internal()
             return
 
-        session = get_session()
-        npc_id = ""
-        with session._lock:
-            npc_id = session.current_map_npc_id_hex
-        if not npc_id or len(npc_id) != 8:
-            _emit_flow_log("star_stone", "当前地图 NPC id 未知，请先触发地图 NPC 列表", level="err")
-            _stop_star_stone_internal()
-            return
+        npc_id = get_current_map_npc_id()
 
         n_next = 0
         with _star_stone_state.lock:
@@ -402,13 +399,7 @@ def _run_transport_supply_loop() -> None:
         if _transport_supply_state.stop_event.wait(timeout=0):
             break
 
-        session = get_session()
-        npc_id = ""
-        with session._lock:
-            npc_id = session.current_map_npc_id_hex
-        if not npc_id or len(npc_id) != 8:
-            _emit_transport_log("缺少当前地图 NPC id，已中止", level="err")
-            break
+        npc_id = get_current_map_npc_id()
 
         _emit_transport_log(f"第 {round_num} 轮：发送购买物资（NPC {npc_id}）…", level="info")
         marker_id = _latest_dn_packet_id()
@@ -612,14 +603,7 @@ def _run_liaoguo_flow(pair: dict[str, Any]) -> None:
 
     _emit_liaoguo_log(f"开始：{item_code} - {label} - {monster_code} - {task_name}", level="ok")
 
-    session = get_session()
-    npc_id = ""
-    with session._lock:
-        npc_id = session.current_map_npc_id_hex
-    if not npc_id:
-        _emit_liaoguo_log("缺少当前地图 NPC id", level="err")
-        _emit_flow_status()
-        return
+    npc_id = get_current_map_npc_id()
 
     _emit_liaoguo_log(f"步骤1/4 兑换任务券（NPC {npc_id}）…", level="info")
     marker_id = _latest_dn_packet_id()

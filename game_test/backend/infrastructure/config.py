@@ -51,6 +51,9 @@ RECV_BUFSIZE = 14048
 
 # 循环战斗「启动延时」仅作后端冷启动 / 未传参时的回退；实际值应由前端请求体传入 loop_delay_ms
 DEFAULT_BATTLE_LOOP_DELAY_MS = 1000
+# 地图 NPC 默认兜底值（全项目统一使用）
+DEFAULT_MAP_NPC_ID_HEX = "38900d00"
+DEFAULT_MAP_NPC_UTF8_TEXT = "通用NPC"
 
 __all__ = [
     "LOGIN_SERVERS",
@@ -62,4 +65,6 @@ __all__ = [
     "SEND_INTERVAL",
     "RECV_BUFSIZE",
     "DEFAULT_BATTLE_LOOP_DELAY_MS",
+    "DEFAULT_MAP_NPC_ID_HEX",
+    "DEFAULT_MAP_NPC_UTF8_TEXT",
 ]

@@ -34,11 +34,8 @@ let teleportDestinationsCache = [];
 const TELEPORT_PACKET_TEMPLATE = '18000000e80303004428{random_num}f5054728000006000000{destination}0000';
 const DAILY_CHECKIN_TEMPLATE = '20000000e80313007d2e08f4f505882e00000e0000000c00636865636b496e446f3f7b7d';
 /** 当前地图 NPC：由后端 Python 解析后随 SSE packet.map_npc 下发 */
-let currentMapNpcFromPacket = { idHex: '38900d00', utf8Text: '通用NPC' };
-const DEFAULT_MAP_NPC = Object.freeze({
-  id_hex: '38900d00',
-  utf8_text: '通用NPC',
-});
+let currentMapNpcFromPacket = { idHex: '', utf8Text: '' };
+let currentMapNpcListFromPacket = [];
 
 // ================================================================== //
 //  工具函数                                                            //
@@ -248,6 +245,12 @@ function updateStatus(data) {
       idHex: String(statusMapNpc.id_hex || '').trim().toLowerCase(),
       utf8Text: String(statusMapNpc.utf8_text || '').trim(),
     };
+    if (!currentMapNpcListFromPacket.length) {
+      currentMapNpcListFromPacket = [{
+        idHex: currentMapNpcFromPacket.idHex,
+        utf8Text: currentMapNpcFromPacket.utf8Text,
+      }];
+    }
   }
   updateMapNpcFromPacketUi();
   const d = data?.default_battle_loop_delay_ms;
@@ -981,6 +984,18 @@ function bytesFromHex(rawHex) {
 function updateMapNpcFromPacketUi() {
   const el = document.getElementById('battle-map-npc-from-packet');
   if (!el) return;
+  if (Array.isArray(currentMapNpcListFromPacket) && currentMapNpcListFromPacket.length) {
+    el.textContent = currentMapNpcListFromPacket
+      .map((x) => {
+        const idHex = String(x?.idHex || '').trim().toLowerCase();
+        if (!idHex) return '';
+        const name = String(x?.utf8Text || '').trim();
+        return name ? `${name} · ${idHex}` : idHex;
+      })
+      .filter(Boolean)
+      .join(' / ') || '—';
+    return;
+  }
   const { idHex, utf8Text } = currentMapNpcFromPacket;
   if (!idHex) {
     el.textContent = '—';
@@ -990,81 +1005,49 @@ function updateMapNpcFromPacketUi() {
   el.textContent = `${name}${idHex}`;
 }
 
-function buildMapNpcOptions(list) {
-  const merged = [DEFAULT_MAP_NPC];
-  const seen = new Set([DEFAULT_MAP_NPC.id_hex]);
-  if (Array.isArray(list)) {
-    list.forEach((row) => {
-      const idHex = String(row?.id_hex || '').trim().toLowerCase();
-      if (!/^[0-9a-f]{8}$/.test(idHex) || seen.has(idHex)) return;
-      seen.add(idHex);
-      merged.push({
-        id_hex: idHex,
-        utf8_text: String(row?.utf8_text || '').trim(),
-      });
-    });
-  }
-  return merged;
+function applyMapNpcFromEntry(entry) {
+  const idHex = String(entry?.id_hex || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{8}$/.test(idHex)) return false;
+  currentMapNpcFromPacket = {
+    idHex,
+    utf8Text: String(entry?.utf8_text || '').trim(),
+  };
+  currentMapNpcListFromPacket = [{
+    idHex: currentMapNpcFromPacket.idHex,
+    utf8Text: currentMapNpcFromPacket.utf8Text,
+  }];
+  updateMapNpcFromPacketUi();
+  return true;
 }
 
-function fillMapNpcSelect(list) {
-  const sel = document.getElementById('map-npc-select');
-  if (!sel) return;
-  sel.innerHTML = '';
-  const options = buildMapNpcOptions(list);
-  sel.disabled = false;
-  options.forEach((row) => {
-    const idHex = String(row.id_hex || '').toLowerCase();
-    const label = (row.utf8_text || idHex) + ` (${idHex})`;
-    const opt = document.createElement('option');
-    opt.value = idHex;
-    opt.textContent = label;
-    opt.dataset.utf8 = String(row.utf8_text || '');
-    sel.appendChild(opt);
+function applyMapNpcFromList(list) {
+  if (!Array.isArray(list) || !list.length) return false;
+  const out = [];
+  const seen = new Set();
+  list.forEach((entry) => {
+    const idHex = String(entry?.id_hex || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{8}$/.test(idHex) || seen.has(idHex)) return;
+    seen.add(idHex);
+    out.push({ idHex, utf8Text: String(entry?.utf8_text || '').trim() });
   });
-  const preferredId = String(currentMapNpcFromPacket.idHex || '').trim().toLowerCase();
-  const preferredIndex = options.findIndex((row) => String(row.id_hex || '').toLowerCase() === preferredId);
-  sel.selectedIndex = preferredIndex >= 0 ? preferredIndex : 0;
-}
-
-async function confirmMapNpcSelection() {
-  const sel = document.getElementById('map-npc-select');
-  if (!sel || sel.disabled || !sel.value) return;
-  const idHex = sel.value.trim().toLowerCase();
-  const opt = sel.selectedOptions[0];
-  const utf8Text = opt ? String(opt.dataset.utf8 || '') : '';
-  const res = await api('POST', '/api/map-npc/current', { id_hex: idHex, utf8_text: utf8Text });
-  if (!res.ok) {
-    showMsg('tool-send-result', res.error || '保存失败', 'err');
-    return;
-  }
-  currentMapNpcFromPacket = { idHex, utf8Text };
+  if (!out.length) return false;
+  currentMapNpcListFromPacket = out;
+  currentMapNpcFromPacket = { ...out[0] };
   updateMapNpcFromPacketUi();
-  showMsg('tool-send-result', `已设为当前地图 NPC：${utf8Text ? `${utf8Text} · ` : ''}${idHex}`, 'ok');
-}
-
-async function ensureDefaultMapNpcSelection() {
-  const idHex = String(currentMapNpcFromPacket.idHex || '').trim().toLowerCase() || DEFAULT_MAP_NPC.id_hex;
-  const utf8Text = String(currentMapNpcFromPacket.utf8Text || '').trim() || DEFAULT_MAP_NPC.utf8_text;
-  currentMapNpcFromPacket = { idHex, utf8Text };
-  updateMapNpcFromPacketUi();
-  await api('POST', '/api/map-npc/current', { id_hex: idHex, utf8_text: utf8Text }).catch(() => null);
+  return true;
 }
 
 function handleMapNpcListDnPacket(record) {
   const list = record?.map_npc_list;
   if (Array.isArray(list) && list.length) {
-    fillMapNpcSelect(list);
-    updateMapNpcFromPacketUi();
+    applyMapNpcFromList(list);
     return;
   }
   const m = record?.map_npc;
   if (!m || !m.id_hex) {
-    // 非地图 NPC 报文：不覆盖当前下拉选项，避免被普通报文重置成仅默认值
     return;
   }
-  fillMapNpcSelect([{ id_hex: m.id_hex, utf8_text: m.utf8_text || '' }]);
-  updateMapNpcFromPacketUi();
+  applyMapNpcFromEntry(m);
 }
 
 function getTransportSupplyNpcIdHexForPacket() {
@@ -1074,11 +1057,7 @@ function getTransportSupplyNpcIdHexForPacket() {
 }
 
 function getCurrentBuyNpcId() {
-  const npcId = getTransportSupplyNpcIdHexForPacket();
-  if (!npcId) {
-    throw new Error('当前地图 NPC id 未知，请先触发地图 NPC 列表并确认当前 NPC');
-  }
-  return npcId;
+  return getTransportSupplyNpcIdHexForPacket();
 }
 
 async function buyByNpcAndItemCode(npcIdHex, itemCodeHex14) {
@@ -2354,7 +2333,6 @@ function toggleCollapseMode() {
 // ================================================================== //
 (async function init() {
   startSSE();
-  await ensureDefaultMapNpcSelection();
 
   // ---- 恢复"自动重连"勾选状态（localStorage 持久化） ----
   const chkAR = document.getElementById('chk-auto-reconnect');
