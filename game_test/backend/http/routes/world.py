@@ -6,11 +6,11 @@ from ...application.world_service import (
     get_teleport_destinations_snapshot,
     parse_map_npc_packet,
     send_chat,
-    set_current_map_npc,
     teleport,
 )
 from ..serializers import _json_ok
 from ..validators import get_json_body
+from ...infrastructure.config import DEFAULT_MAP_NPC_ID_HEX, DEFAULT_MAP_NPC_UTF8_TEXT
 
 
 blueprint = Blueprint("http_world", __name__, url_prefix="/api")
@@ -43,11 +43,11 @@ def api_map_npc_parse():
 
 @blueprint.route("/map-npc/current", methods=["POST"])
 def api_map_npc_current():
-    """将所选 8 位 hex 写入会话当前地图 NPC（购买/运输等后端逻辑使用）。"""
-    body = get_json_body()
+    """该版本固定使用 config 默认 NPC；保留接口但不再改变会话状态。"""
+    _ = get_json_body()  # consume body for compatibility
     return _json_ok(
-        set_current_map_npc(
-            id_hex=body.get("id_hex", ""),
-            utf8_text=body.get("utf8_text", ""),
-        )
+        {
+            "ok": True,
+            "current_map_npc": {"id_hex": DEFAULT_MAP_NPC_ID_HEX, "utf8_text": DEFAULT_MAP_NPC_UTF8_TEXT},
+        }
     )

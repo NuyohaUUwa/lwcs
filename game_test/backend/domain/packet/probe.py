@@ -230,9 +230,6 @@ def record_packet(raw_bytes_or_hex, direction: str) -> Optional[PacketRecord]:
     map_npc = map_npc_list[0] if map_npc_list else None
     record_dict["map_npc"] = map_npc
     session = get_session()
-    if map_npc_list:
-        first = map_npc_list[0]
-        session.set_current_map_npc(str(first["id_hex"]), str(first.get("utf8_text", "")))
     session.append_packet(record_dict)
     append_packet_record(record_dict)
     return record

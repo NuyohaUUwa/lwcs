@@ -12,7 +12,12 @@ if __name__ == "backend.runtime.session":
 elif __name__ == "game_test.backend.runtime.session":
     sys.modules.setdefault("backend.runtime.session", _CURRENT_MODULE)
 
-from game_test.backend.infrastructure.config import DEFAULT_BATTLE_LOOP_DELAY_MS, PACKET_LOG_MAX
+from game_test.backend.infrastructure.config import (
+    DEFAULT_BATTLE_LOOP_DELAY_MS,
+    DEFAULT_MAP_NPC_ID_HEX,
+    DEFAULT_MAP_NPC_UTF8_TEXT,
+    PACKET_LOG_MAX,
+)
 
 from .models import Item, RoleInfo
 
@@ -50,8 +55,9 @@ class GameSession:
         self.backpack_items: Dict[str, Item] = {}
         self.role_stats: Dict[str, str] = {}
         self.role_stats_full_refresh_on_next_ed07: bool = False
-        self.current_map_npc_id_hex: str = ""
-        self.current_map_npc_utf8_text: str = ""
+        # 固定使用 config 默认 NPC；不再从包解析/外部接口动态切换。
+        self.current_map_npc_id_hex: str = DEFAULT_MAP_NPC_ID_HEX
+        self.current_map_npc_utf8_text: str = DEFAULT_MAP_NPC_UTF8_TEXT
 
         # ---- 心跳检测 ----
         self.last_recv_ts: float = 0.0
@@ -408,8 +414,8 @@ class GameSession:
             self.backpack_items = {}
             self.role_stats = {}
             self.role_stats_full_refresh_on_next_ed07 = False
-            self.current_map_npc_id_hex = ""
-            self.current_map_npc_utf8_text = ""
+            self.current_map_npc_id_hex = DEFAULT_MAP_NPC_ID_HEX
+            self.current_map_npc_utf8_text = DEFAULT_MAP_NPC_UTF8_TEXT
             self.last_recv_ts = 0.0
             self.recv_framing_buffer = b""
             self.battle_state = "idle"

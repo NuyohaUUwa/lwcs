@@ -38,7 +38,13 @@ from game_test.backend.domain.roles.roles import (
     parse_role_data,
     parse_select_role_response,
 )
-from game_test.backend.infrastructure.config import GAME_SERVERS, LOGIN_SERVERS, RECV_BUFSIZE
+from game_test.backend.infrastructure.config import (
+    DEFAULT_MAP_NPC_ID_HEX,
+    DEFAULT_MAP_NPC_UTF8_TEXT,
+    GAME_SERVERS,
+    LOGIN_SERVERS,
+    RECV_BUFSIZE,
+)
 from game_test.backend.runtime import RoleInfo, get_session
 from game_test.core.codec import extract_utf8_segments, split_game_frame_bytes
 from game_test.core.connector import (
@@ -199,8 +205,8 @@ def _clear_login_state_after_reconnect_failure() -> None:
         session.backpack_items = {}
         session.role_stats = {}
         session.role_stats_full_refresh_on_next_ed07 = False
-        session.current_map_npc_id_hex = ""
-        session.current_map_npc_utf8_text = ""
+        session.current_map_npc_id_hex = DEFAULT_MAP_NPC_ID_HEX
+        session.current_map_npc_utf8_text = DEFAULT_MAP_NPC_UTF8_TEXT
         session.last_recv_ts = 0.0
         session.recv_framing_buffer = b""
     session.notify_status_change()

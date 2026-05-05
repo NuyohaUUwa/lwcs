@@ -591,7 +591,7 @@ class MultiLaunchApp(tk.Tk):
         if row_sel is None:
             messagebox.showerror("错误", "选中行与配置不一致")
             return
-        err = validate_all(norm)
+        err = validate_row(0, row_sel)
         if err:
             messagebox.showerror("校验失败", err)
             return
