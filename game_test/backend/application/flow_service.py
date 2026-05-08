@@ -279,10 +279,9 @@ def _is_transport_buy_success_message(text: str) -> bool:
 
 
 def _wait_for_transport_buy_dn_ack(*, marker_id: int, timeout_s: float) -> dict[str, Any]:
-    """等待购买后的 e8030100e607 下行，区分成功文案与「领取失败」。"""
+    """等待购买后的 e8030100e607 下行，并返回首条服务器文案。"""
     deadline = time.time() + timeout_s
     target = _TRANSPORT_SUPPLY_BUY_ACK_FP.lower()
-    logged_unknown: set[int] = set()
     while time.time() < deadline:
         if _transport_supply_state.stop_event.wait(timeout=0):
             return {"ok": False, "reason": "stopped"}
@@ -301,13 +300,7 @@ def _wait_for_transport_buy_dn_ack(*, marker_id: int, timeout_s: float) -> dict[
                 return {"ok": False, "reason": "claim_failed", "utf8_text": text, "record_id": rid}
             if _is_transport_buy_success_message(text):
                 return {"ok": True, "utf8_text": text, "record_id": rid}
-            if rid not in logged_unknown:
-                logged_unknown.add(rid)
-                preview = (text[:240].replace("\n", " ").strip() if text else "(空)")
-                _emit_transport_log(
-                    f"收到购买响应 e607，文案未匹配成功/失败关键字，将忽略此条并继续等待。预览：{preview}",
-                    level="info",
-                )
+            return {"ok": False, "reason": "unmatched_text", "utf8_text": text, "record_id": rid}
         time.sleep(0.2)
     return {"ok": False, "reason": "timeout"}
 
@@ -406,7 +399,7 @@ def _run_transport_supply_loop() -> None:
         buy_res = send_action("item.buy", {"npc_id": npc_id, "item_code": _TRANSPORT_SUPPLY_BUY_ITEM_CODE})
         if not buy_res.get("ok"):
             _emit_transport_log(f"购买发送失败：{buy_res.get('error', '未知错误')}", level="err")
-            break
+            continue
 
         _emit_transport_log(
             f"等待购买结果下行（指纹 {_TRANSPORT_SUPPLY_BUY_ACK_FP}），最长 {_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S:.0f}s…",
@@ -419,27 +412,30 @@ def _run_transport_supply_loop() -> None:
             _emit_transport_log("已停止（等待购买响应阶段中断）", level="info")
             break
         if not buy_ack.get("ok"):
+            raw_text = str(buy_ack.get("utf8_text") or "")
+            raw_direct = raw_text if raw_text else "(无文本)"
             if buy_ack.get("reason") == "claim_failed":
-                detail = str(buy_ack.get("utf8_text") or "")
-                snippet = detail.replace("\n", " ").strip()[:300] if detail else ""
                 _emit_transport_log(
-                    f"购买失败：服务端返回「{_TRANSPORT_SUPPLY_BUY_FAIL_TEXT}」。原文摘要：{snippet or '(无文本)'}",
+                    f"购买失败：服务端原文：{raw_direct}",
                     level="err",
+                )
+            elif buy_ack.get("reason") == "unmatched_text":
+                _emit_transport_log(
+                    f"购买响应未匹配预期文案，服务端原文：{raw_direct}",
+                    level="warn",
                 )
             elif buy_ack.get("reason") == "timeout":
                 _emit_transport_log(
-                    f"购买确认超时：{_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S:.0f}s 内未收到 "
-                    f"{_TRANSPORT_SUPPLY_BUY_ACK_FP} 且含「1000金消失了」「获得」「5级物资」的成功文案",
+                    f"购买确认超时：{_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S:.0f}s 内未收到 {_TRANSPORT_SUPPLY_BUY_ACK_FP}",
                     level="err",
                 )
             else:
                 _emit_transport_log(f"购买确认失败：{buy_ack.get('reason', '未知')}", level="err")
-            break
+            continue
 
-        ok_text = str(buy_ack.get("utf8_text") or "").replace("\n", " ").strip()
-        ok_preview = ok_text[:400] + ("…" if len(ok_text) > 400 else "")
+        ok_text = str(buy_ack.get("utf8_text") or "")
         _emit_transport_log(
-            f"购买成功：已收到 {_TRANSPORT_SUPPLY_BUY_ACK_FP}，文案匹配（1000金消失 / 获得 / 5级物资）。{ok_preview}",
+            f"购买成功：服务端原文：{ok_text if ok_text else '(无文本)'}",
             level="ok",
         )
 

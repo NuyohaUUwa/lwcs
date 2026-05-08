@@ -21,9 +21,13 @@ elif __name__ == "game_test.backend.infrastructure.packet_log_service":
     sys.modules.setdefault("backend.infrastructure.packet_log_service", _CURRENT_MODULE)
 
 MAX_PACKET_LOG_FILES = 10
+MAX_PACKET_LOG_LINES = 100000
+MAX_LOG_RAW_HEX_CHARS = 2048
+MAX_LOG_UTF8_TEXT_CHARS = 512
 
 _log_lock = threading.Lock()
 _current_log_path: str | None = None
+_current_log_lines = 0
 
 
 def _build_session_log_path() -> str:
@@ -31,6 +35,14 @@ def _build_session_log_path() -> str:
     ms = int((time.time() % 1) * 1000)
     pid = os.getpid()
     return os.path.join(PACKET_LOG_DIR, f"packet-session-{ts}-{ms:03d}-{pid}.jsonl")
+
+
+def _count_file_lines(path: str) -> int:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
 
 
 def _list_session_logs() -> list[str]:
@@ -53,7 +65,7 @@ def _prune_old_logs() -> None:
 
 
 def init_packet_log_session() -> str:
-    global _current_log_path
+    global _current_log_path, _current_log_lines
 
     with _log_lock:
         if _current_log_path:
@@ -64,26 +76,86 @@ def init_packet_log_session() -> str:
             _current_log_path = _build_session_log_path()
             with open(_current_log_path, "a", encoding="utf-8"):
                 pass
+            _current_log_lines = _count_file_lines(_current_log_path)
             _prune_old_logs()
         except Exception as e:
             print(f"[packet_log] 初始化日志会话失败: {e}")
             _current_log_path = ""
+            _current_log_lines = 0
         return _current_log_path
 
 
+def _rotate_log_if_needed() -> None:
+    global _current_log_path, _current_log_lines
+    if _current_log_lines < MAX_PACKET_LOG_LINES:
+        return
+    _current_log_path = _build_session_log_path()
+    with open(_current_log_path, "a", encoding="utf-8"):
+        pass
+    _current_log_lines = 0
+    _prune_old_logs()
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "…"
+
+
+def _build_compact_record(record: dict) -> dict:
+    compact = dict(record)
+
+    # 冗余字段可由 ts 还原，落盘时删除
+    compact.pop("ts_str", None)
+
+    # 空字段不落盘
+    if not compact.get("annotation"):
+        compact.pop("annotation", None)
+    if compact.get("map_npc") is None:
+        compact.pop("map_npc", None)
+    if compact.get("map_npc_list") is None:
+        compact.pop("map_npc_list", None)
+
+    # parsed 仅保留必要信息，并限制 utf8 文本长度
+    parsed = compact.get("parsed")
+    if isinstance(parsed, dict):
+        parsed_copy = dict(parsed)
+        utf8_text = parsed_copy.get("utf8_text")
+        if isinstance(utf8_text, str):
+            parsed_copy["utf8_text"] = _truncate_text(utf8_text, MAX_LOG_UTF8_TEXT_CHARS)
+        compact["parsed"] = parsed_copy
+    elif parsed is None:
+        compact.pop("parsed", None)
+
+    # 原始报文过长时仅保留首尾，显著减小落盘体积
+    raw_hex = compact.get("raw_hex")
+    if isinstance(raw_hex, str) and len(raw_hex) > MAX_LOG_RAW_HEX_CHARS:
+        keep_head = MAX_LOG_RAW_HEX_CHARS // 2
+        keep_tail = MAX_LOG_RAW_HEX_CHARS - keep_head
+        compact["raw_hex_len"] = len(raw_hex)
+        compact["raw_hex"] = f"{raw_hex[:keep_head]}...[truncated]...{raw_hex[-keep_tail:]}"
+        compact["raw_hex_truncated"] = True
+
+    return compact
+
+
 def append_packet_record(record: dict) -> None:
+    global _current_log_lines
     path = init_packet_log_session()
     if not path:
         return
 
     try:
-        line = json.dumps(record, ensure_ascii=False)
+        line = json.dumps(_build_compact_record(record), ensure_ascii=False, separators=(",", ":"))
         with _log_lock:
+            _rotate_log_if_needed()
+            path = _current_log_path or path
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line)
                 f.write("\n")
+            _current_log_lines += 1
     except Exception as e:
         print(f"[packet_log] 追加报文日志失败: {e}")
 
 
-__all__ = ["MAX_PACKET_LOG_FILES", "init_packet_log_session", "append_packet_record"]
+__all__ = ["MAX_PACKET_LOG_FILES", "MAX_PACKET_LOG_LINES", "init_packet_log_session", "append_packet_record"]
