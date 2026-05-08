@@ -204,21 +204,34 @@ def dispatch_feature_action(action_name: str, payload: dict[str, Any]) -> dict[s
 
     if action_name == "item.synthesize":
         item_id = str(payload.get("item_id", "")).strip().lower()
+        quantity = int(payload.get("quantity", 1))
         if not item_id:
             return {"ok": False, "error": "item_id 不能为空"}
+        if quantity <= 0:
+            return {"ok": False, "error": "数量必须大于0"}
         try:
             packet_hex = item_use.build_synthesize_packet(item_id)
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         with session._lock:
-            if item_id not in session.backpack_items:
+            item = session.backpack_items.get(item_id)
+            if not item:
                 return {"ok": False, "error": "背包中不存在该物品"}
-        res = send_raw_action(packet_hex, priority=0, use_queue=True)
-        if not res.get("ok"):
-            return res
-        result = {"ok": True, "queued": 1}
-        if res.get("validation_warning"):
-            result["validation_warning"] = res["validation_warning"]
+            current_qty = int(item.quantity or 0)
+        if quantity > current_qty:
+            return {"ok": False, "error": f"数量不足（当前 {current_qty}，请求 {quantity}）"}
+        warnings = []
+        queued = 0
+        for _ in range(quantity):
+            res = send_raw_action(packet_hex, priority=0, use_queue=True)
+            if not res.get("ok"):
+                return res
+            queued += 1
+            if res.get("validation_warning"):
+                warnings.append(res["validation_warning"])
+        result = {"ok": True, "queued": queued}
+        if warnings:
+            result["validation_warning"] = " | ".join(dict.fromkeys(warnings))
         return result
 
     if action_name == "item.decompose_all":

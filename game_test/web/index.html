@@ -150,6 +150,7 @@
   .item-qty { color: var(--text2); font-size: 11px; margin-top: 3px; }
   .item-id { color: #444; font-size: 10px; font-family: monospace; margin-top: 2px; }
   #backpack-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  #backpack-action-qty { width: 88px; }
   #backpack-buy-code { font-family: monospace; font-size: 12px; min-width: 280px; flex: 1 1 320px; }
   #backpack-buy-name { min-width: 160px; flex: 0 1 180px; }
   #star-stone-log, #backpack-flow-log {
@@ -448,6 +449,10 @@
     <!-- 背包 Tab -->
     <div class="tab-content panel-body" id="tab-backpack">
       <div id="backpack-actions">
+        <label class="text-muted text-sm" for="backpack-action-qty" style="display:flex; align-items:center; gap:6px;">
+          次数
+          <input type="text" id="backpack-action-qty" inputmode="numeric" autocomplete="off" value="1" placeholder="1">
+        </label>
         <button type="button" class="btn btn-success btn-sm" data-synth-disable="1" onclick="useSelected()">使用</button>
         <button type="button" class="btn btn-danger btn-sm" data-synth-disable="1" onclick="dropSelected()">丢弃</button>
         <button type="button" class="btn btn-warn btn-sm" data-synth-disable="1" onclick="decomposeSelected()">分解</button>

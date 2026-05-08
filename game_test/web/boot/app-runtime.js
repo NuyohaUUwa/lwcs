@@ -677,6 +677,10 @@ async function refreshBackpack() {
 function renderBackpack(items) {
   backpackItemsCache = Array.isArray(items) ? items : [];
   const grid = document.getElementById('backpack-grid');
+  if (selectedItemId && !backpackItemsCache.some((x) => x.item_id === selectedItemId)) {
+    selectedItemId = null;
+  }
+  syncBackpackActionQtyInput();
   document.getElementById('backpack-count').textContent = `共 ${backpackItemsCache.length} 件`;
   if (!backpackItemsCache.length) {
     grid.innerHTML = '<div class="text-muted text-sm">背包为空</div>';
@@ -694,21 +698,64 @@ function renderBackpack(items) {
       document.querySelectorAll('.item-card').forEach(x => x.classList.remove('selected'));
       d.classList.add('selected');
       selectedItemId = item.item_id;
+      syncBackpackActionQtyInput();
     };
     grid.appendChild(d);
   });
 }
 
+function getSelectedBackpackItem() {
+  if (!selectedItemId) return null;
+  return backpackItemsCache.find((x) => x.item_id === selectedItemId) || null;
+}
+
+function getBackpackActionQuantity(actionText) {
+  const selected = getSelectedBackpackItem();
+  if (!selected) {
+    showMsg('backpack-msg', '请先选择物品', 'err');
+    return null;
+  }
+  const raw = String(document.getElementById('backpack-action-qty')?.value || '').trim();
+  const req = Number(raw);
+  if (!Number.isInteger(req) || req <= 0) {
+    showMsg('backpack-msg', '次数必须是大于 0 的整数', 'err');
+    return null;
+  }
+  const maxQty = Math.max(1, Number(selected.quantity || 0));
+  if (req > maxQty) {
+    showMsg('backpack-msg', `${actionText}次数不能大于当前物品数量（最多 ${maxQty}）`, 'err');
+    return null;
+  }
+  return req;
+}
+
+function syncBackpackActionQtyInput() {
+  const input = document.getElementById('backpack-action-qty');
+  if (!input) return;
+  const selected = getSelectedBackpackItem();
+  const maxQty = selected ? Math.max(1, Number(selected.quantity || 0)) : null;
+  const current = Number(String(input.value || '').trim());
+  if (!Number.isInteger(current) || current <= 0) {
+    input.value = '1';
+    return;
+  }
+  if (maxQty !== null && current > maxQty) {
+    input.value = String(maxQty);
+  }
+}
+
 async function useSelected() {
-  if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
-  const res = await api('POST', '/api/item/use', { item_id: selectedItemId, quantity: 1 });
+  const quantity = getBackpackActionQuantity('使用');
+  if (quantity == null) return;
+  const res = await api('POST', '/api/item/use', { item_id: selectedItemId, quantity });
   showMsg('backpack-msg', res.ok ? withValidationWarning(`已加入发送队列 x${res.queued}`, res) : res.error, res.ok ? 'ok' : 'err');
 }
 
 async function dropSelected() {
-  if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
-  const res = await api('POST', '/api/item/drop', { item_id: selectedItemId, quantity: 1 });
-  showMsg('backpack-msg', res.ok ? withValidationWarning('丢弃请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
+  const quantity = getBackpackActionQuantity('丢弃');
+  if (quantity == null) return;
+  const res = await api('POST', '/api/item/drop', { item_id: selectedItemId, quantity });
+  showMsg('backpack-msg', res.ok ? withValidationWarning(`丢弃请求已入队 x${res.actual_quantity || quantity}`, res) : res.error, res.ok ? 'ok' : 'err');
 }
 
 async function decomposeSelected() {
@@ -718,9 +765,10 @@ async function decomposeSelected() {
 }
 
 async function synthesizeSelected() {
-  if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
-  const res = await api('POST', '/api/item/synthesize', { item_id: selectedItemId });
-  showMsg('backpack-msg', res.ok ? withValidationWarning('合成请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
+  const quantity = getBackpackActionQuantity('合成');
+  if (quantity == null) return;
+  const res = await api('POST', '/api/item/synthesize', { item_id: selectedItemId, quantity });
+  showMsg('backpack-msg', res.ok ? withValidationWarning(`合成请求已入队 x${res.queued || quantity}`, res) : res.error, res.ok ? 'ok' : 'err');
 }
 
 /** 下行 e80301004f51 合成结果，与「合成请求已入队」区分展示 */
@@ -2333,6 +2381,16 @@ function toggleCollapseMode() {
 // ================================================================== //
 (async function init() {
   startSSE();
+  const backpackQtyInput = document.getElementById('backpack-action-qty');
+  if (backpackQtyInput) {
+    backpackQtyInput.addEventListener('input', () => {
+      // 仅允许数字输入，避免误输入字母导致提交失败提示过多。
+      backpackQtyInput.value = String(backpackQtyInput.value || '').replace(/\D+/g, '');
+    });
+    backpackQtyInput.addEventListener('blur', () => {
+      syncBackpackActionQtyInput();
+    });
+  }
 
   // ---- 恢复"自动重连"勾选状态（localStorage 持久化） ----
   const chkAR = document.getElementById('chk-auto-reconnect');
@@ -2367,13 +2425,14 @@ function toggleCollapseMode() {
       showServerPanel('', []);
     }
   }
+  // 必须先同步勾选到后端再 GET：否则服务端默认 false 会通过 setControlState 改掉勾选框，
+  // 紧接着的 PUT 会误提交 false，导致「明明勾了自动重连却不生效」（尤其刷新页面后）。
+  await api('PUT', '/api/control-config', { auto_reconnect: chkAR.checked }).catch(() => null);
   const controlRes = await api('GET', '/api/control-state').catch(() => null);
   if (controlRes?.ok) {
     setControlState(controlRes.control_state || {});
     updateBattleState(controlRes.battle_state || {});
   }
-  const appliedControl = await api('PUT', '/api/control-config', { auto_reconnect: chkAR.checked }).catch(() => null);
-  if (appliedControl?.ok && appliedControl.control_state) setControlState(appliedControl.control_state);
   loadMonsters();
   loadAutoUseRules();
   loadQuickLogins();
