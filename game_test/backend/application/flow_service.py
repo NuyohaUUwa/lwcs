@@ -246,6 +246,7 @@ _TRANSPORT_SUPPLY_WAIT_BUY_MS = 65000
 _TRANSPORT_SUPPLY_BUY_ACK_FP = "e8030100e607"
 _TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S = 30.0
 _TRANSPORT_SUPPLY_BUY_FAIL_TEXT = "领取失败"
+_TRANSPORT_SUPPLY_ALREADY_ACTIVE_TEXT = "同时只能领取一次任务"
 
 
 def _build_transport_deliver_hex(npc_id: str) -> str:
@@ -420,30 +421,35 @@ def _run_transport_supply_loop() -> None:
         if not buy_ack.get("ok"):
             raw_text = str(buy_ack.get("utf8_text") or "")
             raw_direct = raw_text if raw_text else "(无文本)"
-            if buy_ack.get("reason") == "claim_failed":
+            already_active = (
+                buy_ack.get("reason") == "claim_failed"
+                and _TRANSPORT_SUPPLY_ALREADY_ACTIVE_TEXT in raw_text
+            )
+            if already_active:
                 _emit_transport_log(
-                    f"购买失败：服务端原文：{raw_direct}",
-                    level="err",
-                )
-            elif buy_ack.get("reason") == "unmatched_text":
-                _emit_transport_log(
-                    f"购买响应未匹配预期文案，服务端原文：{raw_direct}",
+                    f"服务端报「已有任务」，视为已购买，继续交付。服务端原文：{raw_direct}",
                     level="warn",
                 )
-            elif buy_ack.get("reason") == "timeout":
-                _emit_transport_log(
-                    f"购买确认超时：{_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S:.0f}s 内未收到 {_TRANSPORT_SUPPLY_BUY_ACK_FP}",
-                    level="err",
-                )
             else:
-                _emit_transport_log(f"购买确认失败：{buy_ack.get('reason', '未知')}", level="err")
-            continue
-
-        ok_text = str(buy_ack.get("utf8_text") or "")
-        _emit_transport_log(
-            f"购买成功：服务端原文：{ok_text if ok_text else '(无文本)'}",
-            level="ok",
-        )
+                if buy_ack.get("reason") == "claim_failed":
+                    _emit_transport_log(
+                        f"购买失败：服务端原文：{raw_direct}",
+                        level="err",
+                    )
+                elif buy_ack.get("reason") == "timeout":
+                    _emit_transport_log(
+                        f"购买确认超时：{_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S:.0f}s 内未收到 {_TRANSPORT_SUPPLY_BUY_ACK_FP}",
+                        level="err",
+                    )
+                else:
+                    _emit_transport_log(f"购买确认失败：{buy_ack.get('reason', '未知')}。服务端原文：{raw_direct}", level="err")
+                continue
+        else:
+            ok_text = str(buy_ack.get("utf8_text") or "")
+            _emit_transport_log(
+                f"购买成功：服务端原文：{ok_text if ok_text else '(无文本)'}",
+                level="ok",
+            )
 
         time.sleep(0.8)
         if _transport_supply_state.stop_event.wait(timeout=0):
@@ -503,6 +509,7 @@ def _run_transport_supply_loop() -> None:
             _emit_transport_log(f"流程结束：仍有 {_transport_supply_state.pending_reward_uses} 张奖励票未自动使用", level="err")
         else:
             _emit_transport_log("流程结束", level="info")
+        _transport_supply_state.running = False
     _emit_flow_status()
 
 
