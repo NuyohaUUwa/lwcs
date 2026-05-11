@@ -780,19 +780,6 @@ function onSynthesisResult(data) {
   showMsg('backpack-msg', msg, level);
 }
 
-async function decomposeAll() {
-  const role = document.getElementById('role-badge').textContent;
-  const jobMap = { '侠客': ['侠士战甲','侠士头盔'], '刺客': ['刺客战甲','刺客头盔'], '术士': ['术士战甲','术士头盔'] };
-  let protected_items = [];
-  for (const [job, items] of Object.entries(jobMap)) {
-    if (role.includes(job)) { protected_items = items; break; }
-  }
-  const res = await api('POST', '/api/item/decompose-all', { protected_items });
-  showMsg('backpack-msg',
-    res.ok ? withValidationWarning(`一键分解完成：已分解 ${res.queued?.length || 0} 件，跳过 ${res.skipped?.length || 0} 件`, res) : res.error,
-    res.ok ? 'ok' : 'err');
-}
-
 async function exchangeWuling() {
   const res = await api('POST', '/api/item/exchange-wuling');
   showMsg('backpack-msg', res.ok ? withValidationWarning('兑换五灵请求已入队', res) : res.error, res.ok ? 'ok' : 'err');

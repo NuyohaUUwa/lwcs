@@ -234,23 +234,6 @@ def dispatch_feature_action(action_name: str, payload: dict[str, Any]) -> dict[s
             result["validation_warning"] = " | ".join(dict.fromkeys(warnings))
         return result
 
-    if action_name == "item.decompose_all":
-        protected_items = payload.get("protected_items", [])
-        targets, skipped = item_use.pick_decompose_targets(protected_items)
-        queued = []
-        warnings = []
-        for item in targets:
-            res = send_raw_action(item_use.build_decompose_packet(item.item_id), priority=0, use_queue=True)
-            if res.get("ok"):
-                queued.append(item.name)
-                if res.get("validation_warning"):
-                    warnings.append(res["validation_warning"])
-        item_use.optimistic_decompose_items(targets)
-        result: dict[str, Any] = {"ok": True, "queued": queued, "skipped": skipped}
-        if warnings:
-            result["validation_warning"] = " | ".join(dict.fromkeys(warnings))
-        return result
-
     if action_name == "item.exchange_wuling":
         return send_raw_action(item_use.build_exchange_wuling_packet(), priority=10, use_queue=True)
 

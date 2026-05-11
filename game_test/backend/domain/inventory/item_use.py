@@ -90,7 +90,7 @@ def build_synthesize_packet(item_id: str) -> str:
 
 
 def build_exchange_wuling_packet() -> str:
-    return "27000000e8030d00fe03f5fff50510040000150000004a02000002069d0900000000000000000001000000"
+    return build_buy_item_packet(get_current_map_npc_id(), "02069d09000000")
 
 
 def build_buy_item_packet(npc_id: str, item_code: str) -> str:
@@ -115,45 +115,8 @@ def get_current_map_npc_id() -> str:
     return _normalize_hex(DEFAULT_MAP_NPC_ID_HEX, 8, "npc_id")
 
 
-def pick_decompose_targets(protected_items: list | None = None) -> tuple[list, list]:
-    session = get_session()
-    if protected_items is None:
-        protected_items = []
-
-    with session._lock:
-        items = list(session.backpack_items.values())
-
-    to_decompose = []
-    skipped = []
-    for item in items:
-        if not item.can_disassemble:
-            continue
-        if "黄金" in item.name:
-            skipped.append(item.name)
-            continue
-        if any(kw in item.name for kw in protected_items):
-            skipped.append(item.name)
-            continue
-        to_decompose.append(item)
-    return to_decompose, skipped
-
-
 def optimistic_consume_item(item_id: str, quantity: int) -> tuple[bool, str]:
     return get_session().consume_item(item_id, quantity)
-
-
-def optimistic_decompose_items(items: list):
-    session = get_session()
-    with session._lock:
-        for item in items:
-            existing = session.backpack_items.get(item.item_id)
-            if not existing:
-                continue
-            if existing.quantity <= 1:
-                del session.backpack_items[item.item_id]
-            else:
-                existing.quantity -= 1
-    session.notify_backpack_update()
 
 
 # 下行 e80301004f51：合成结果（UTF-8 提示嵌在报文内）

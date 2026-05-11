@@ -4,7 +4,6 @@ from flask import Blueprint, jsonify
 
 from ...application.inventory_service import (
     buy_item,
-    decompose_all_items,
     decompose_item,
     drop_item,
     exchange_wuling,
@@ -48,11 +47,6 @@ def api_item_decompose():
 @blueprint.route("/item/synthesize", methods=["POST"])
 def api_item_synthesize():
     return _json_ok(synthesize_item(get_json_body()))
-
-
-@blueprint.route("/item/decompose-all", methods=["POST"])
-def api_item_decompose_all():
-    return _json_ok(decompose_all_items(get_json_body()))
 
 
 @blueprint.route("/item/exchange-wuling", methods=["POST"])
