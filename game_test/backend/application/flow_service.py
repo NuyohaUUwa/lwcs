@@ -282,6 +282,7 @@ def _wait_for_transport_buy_dn_ack(*, marker_id: int, timeout_s: float) -> dict[
     """等待购买后的 e8030100e607 下行，并返回首条服务器文案。"""
     deadline = time.time() + timeout_s
     target = _TRANSPORT_SUPPLY_BUY_ACK_FP.lower()
+    logged_unknown: set[int] = set()
     while time.time() < deadline:
         if _transport_supply_state.stop_event.wait(timeout=0):
             return {"ok": False, "reason": "stopped"}
@@ -300,7 +301,12 @@ def _wait_for_transport_buy_dn_ack(*, marker_id: int, timeout_s: float) -> dict[
                 return {"ok": False, "reason": "claim_failed", "utf8_text": text, "record_id": rid}
             if _is_transport_buy_success_message(text):
                 return {"ok": True, "utf8_text": text, "record_id": rid}
-            return {"ok": False, "reason": "unmatched_text", "utf8_text": text, "record_id": rid}
+            if rid not in logged_unknown:
+                logged_unknown.add(rid)
+                _emit_transport_log(
+                    f"购买响应未匹配预期文案，继续等待本轮确认。服务端原文：{text if text else '(无文本)'}",
+                    level="info",
+                )
         time.sleep(0.2)
     return {"ok": False, "reason": "timeout"}
 

@@ -56,6 +56,8 @@ from game_test.core.connector import (
 
 _CONTROL_LOOP_SLEEP_S = 0.2
 _RECONNECT_STEP_DELAY_S = 1.5
+_RECONNECT_SELECT_ROLE_RETRY = 3
+_RECONNECT_SELECT_ROLE_RETRY_DELAY_S = 1.0
 _BANNED_ROLE_HEX_TOKEN = "e8afa5e8a792e889b2e5b7b2e8a2abe7a681e5b081"
 _BANNED_ROLE_TEXT = "该角色已被禁封"
 
@@ -257,7 +259,29 @@ def _perform_backend_reconnect():
         flow_res = fetch_roles_flow(server_ip=server_ip, server_port=server_port, server_name=server_name)
     if flow_res.get("ok"):
         time.sleep(_RECONNECT_STEP_DELAY_S)
-        flow_res = select_role_flow(role_id)
+        last_select_err = ""
+        for i in range(1, _RECONNECT_SELECT_ROLE_RETRY + 1):
+            flow_res = select_role_flow(role_id)
+            if flow_res.get("ok"):
+                break
+            last_select_err = str(flow_res.get("error") or "未知错误")
+            if i >= _RECONNECT_SELECT_ROLE_RETRY:
+                break
+            _emit_control_log(
+                f"自动重连选角失败（第 {i}/{_RECONNECT_SELECT_ROLE_RETRY} 次）：{last_select_err}；准备重试",
+                level="warn",
+                scope="reconnect",
+            )
+            time.sleep(_RECONNECT_SELECT_ROLE_RETRY_DELAY_S)
+            # 选角失败后连接可能已被关闭，重试前重新拉取角色列表并恢复游戏连接上下文。
+            flow_res = fetch_roles_flow(server_ip=server_ip, server_port=server_port, server_name=server_name)
+            if not flow_res.get("ok"):
+                _emit_control_log(
+                    f"自动重连选角重试前重新获取角色列表失败：{flow_res.get('error', '未知错误')}",
+                    level="warn",
+                    scope="reconnect",
+                )
+                break
 
     if flow_res.get("ok"):
         _update_reconnect_state(
@@ -678,6 +702,8 @@ def select_role_flow(role_id: str) -> dict[str, Any]:
 def disconnect_flow() -> dict[str, Any]:
     session = get_session()
     if session.battle_loop_running:
+        # 循环战斗中手动断开时，清掉“等待响应中”的战斗态，避免后续重连后因旧状态拦截再次启动。
+        reset_battle_state(preserve_loop=True)
         session.connected = False
         session.connection_status = "disconnected"
         session.stop_runtime()
