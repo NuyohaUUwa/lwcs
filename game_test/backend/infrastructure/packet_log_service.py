@@ -130,10 +130,12 @@ def _build_compact_record(record: dict) -> dict:
     # 原始报文过长时仅保留首尾，显著减小落盘体积
     raw_hex = compact.get("raw_hex")
     if isinstance(raw_hex, str) and len(raw_hex) > MAX_LOG_RAW_HEX_CHARS:
-        keep_head = MAX_LOG_RAW_HEX_CHARS // 2
-        keep_tail = MAX_LOG_RAW_HEX_CHARS - keep_head
+        separator = "...[truncated]..."
+        available = MAX_LOG_RAW_HEX_CHARS - len(separator)
+        keep_head = available // 2
+        keep_tail = available - keep_head
         compact["raw_hex_len"] = len(raw_hex)
-        compact["raw_hex"] = f"{raw_hex[:keep_head]}...[truncated]...{raw_hex[-keep_tail:]}"
+        compact["raw_hex"] = f"{raw_hex[:keep_head]}{separator}{raw_hex[-keep_tail:]}"
         compact["raw_hex_truncated"] = True
 
     return compact

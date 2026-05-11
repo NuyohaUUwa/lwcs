@@ -441,8 +441,6 @@ def _run_transport_supply_loop() -> None:
                         f"购买确认超时：{_TRANSPORT_SUPPLY_BUY_ACK_TIMEOUT_S:.0f}s 内未收到 {_TRANSPORT_SUPPLY_BUY_ACK_FP}",
                         level="err",
                     )
-                else:
-                    _emit_transport_log(f"购买确认失败：{buy_ack.get('reason', '未知')}。服务端原文：{raw_direct}", level="err")
                 continue
         else:
             ok_text = str(buy_ack.get("utf8_text") or "")
