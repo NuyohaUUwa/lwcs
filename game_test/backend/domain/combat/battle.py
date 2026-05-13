@@ -44,6 +44,26 @@ BATTLE_DE07_HEX_MARK = "030100de07"
 MAX_F703_TIMEOUT_RECOVER = 3
 MAX_DF07_BATTLE_ENDED_NOTICE = 3
 
+# 战斗全流程：下行含「保护时间」类提示（含登录保护不可打怪）时，延时后重发 f603
+_BATTLE_PROTECT_TIME_HINT = "保护时间"
+_F603_LOGIN_PROTECT_TEXT = "登录保护时间，不可打怪"
+_F603_LOGIN_PROTECT_UTF8_HEX = (
+    "e799bbe5bd95e4bf9de68aa4e697b6e997b4efbc8ce4b88de58fafe68993e680aa"
+)
+MAX_F603_LOGIN_PROTECT_RETRY = 3
+_F603_LOGIN_PROTECT_RETRY_DELAY_S = 5.0
+
+
+def _battle_response_has_protect_time(packet_hex: str, text: str | None = None) -> bool:
+    if text is None:
+        text = _decode_utf8_text(packet_hex)
+    pl = packet_hex.lower()
+    if _BATTLE_PROTECT_TIME_HINT in text or _F603_LOGIN_PROTECT_TEXT in text:
+        return True
+    if _F603_LOGIN_PROTECT_UTF8_HEX in pl:
+        return True
+    return False
+
 
 def _load_default_monsters() -> list:
     """从 paths.MONSTERS_FILE 加载默认怪物列表。"""
@@ -382,6 +402,7 @@ def _build_battle_state_snapshot(session) -> Dict[str, Any]:
         "total_gold_copper": session.battle_total_gold_copper,
         "f703_timeout_recover_count": session.battle_f703_timeout_recover_count,
         "battle_ended_notice_count": session.battle_ended_notice_count,
+        "f603_login_protect_retry_count": session.battle_f603_login_protect_retry_count,
     }
 
 
@@ -519,6 +540,9 @@ def _start_battle_round(monster_code: str, *, run_pre_battle_actions: bool) -> D
     if not res.get("ok"):
         return res
 
+    session = get_session()
+    with session._lock:
+        session.battle_f603_login_protect_retry_count = 0
     mark_battle_started(built["monster_code"])
     result = {
         "ok": True,
@@ -764,6 +788,7 @@ def mark_battle_error(reason: str):
     with session._lock:
         session.battle_f703_timeout_recover_count = 0
         session.battle_ended_notice_count = 0
+        session.battle_f603_login_protect_retry_count = 0
     _set_battle_state(
         state=BATTLE_STATE_ERROR,
         in_progress=False,
@@ -795,6 +820,7 @@ def reset_battle_state(*, preserve_loop: bool = False):
         session.battle_next_start_ts = 0.0
         session.battle_f703_timeout_recover_count = 0
         session.battle_ended_notice_count = 0
+        session.battle_f603_login_protect_retry_count = 0
     _set_battle_state(
         state=BATTLE_STATE_IDLE,
         in_progress=False,
@@ -910,6 +936,8 @@ def parse_battle_response(packet_hex: str) -> Dict[str, Any]:
     with session._lock:
         prev_state = session.battle_state
         prev_round = session.battle_round_seq
+        if prev_state in (BATTLE_STATE_WAITING_START_RESPONSE, BATTLE_STATE_WAITING_ACTION_RESULT):
+            session.battle_f603_login_protect_retry_count = 0
 
     payload.update(
         {
@@ -975,6 +1003,11 @@ def _mark_role_stats_full_refresh_on_next_ed07() -> None:
 def parse_battle_end(packet_hex: str) -> Dict[str, Any]:
     """解析 df07：三类——进行中（继续 f703）、内力不足（停战）、战斗已结束（仅提示，胜负看 e207）。"""
     session = get_session()
+    with session._lock:
+        prev_state_early = session.battle_state
+        if prev_state_early == BATTLE_STATE_WAITING_ACTION_RESULT:
+            session.battle_f603_login_protect_retry_count = 0
+
     packet_hex_l = packet_hex.lower()
     payload = _base_battle_payload(packet_hex)
     text = payload["raw_text"]
@@ -1187,6 +1220,138 @@ def handle_battle_settlement_e207(packet_hex: str) -> Dict[str, Any]:
     return payload
 
 
+def _maybe_handle_battle_protect_time_resend_f603(packet_hex: str, *, packet_kind: str) -> dict[str, Any] | None:
+    """战斗全流程：等 f603 或发 f703 后，下行含「保护时间」类提示则延时重发 f603，最多 MAX_F603_LOGIN_PROTECT_RETRY 次。"""
+    session = get_session()
+    packet_hex_l = packet_hex.lower()
+    if packet_kind == "de07":
+        if BATTLE_DE07_HEX_MARK not in packet_hex_l:
+            return None
+    elif packet_kind == "df07":
+        if "df07" not in packet_hex_l:
+            return None
+    else:
+        return None
+
+    text = _decode_utf8_text(packet_hex)
+    if not _battle_response_has_protect_time(packet_hex, text):
+        return None
+
+    with session._lock:
+        prev_state = session.battle_state
+        last_action = str(session.battle_last_action or "")
+        monster = (session.battle_current_monster or session.battle_loop_monster_code or "").strip().lower()
+
+    eligible = prev_state == BATTLE_STATE_WAITING_START_RESPONSE or (
+        prev_state == BATTLE_STATE_WAITING_ACTION_RESULT and last_action == "f703"
+    )
+    if not eligible:
+        return None
+
+    from game_test.backend.runtime.actions import send_raw_action
+
+    now = time.time()
+    with session._lock:
+        session.battle_f603_login_protect_retry_count = int(session.battle_f603_login_protect_retry_count or 0) + 1
+        n = session.battle_f603_login_protect_retry_count
+        if len(monster) != 4:
+            monster = (session.battle_loop_monster_code or session.battle_current_monster or "").strip().lower()
+
+    if len(monster) != 4:
+        mark_battle_error("保护时间重试失败：缺少怪物代码")
+        pl = {
+            **_base_battle_payload(packet_hex),
+            "packet_type": packet_kind,
+            "login_protect": True,
+            "is_end_confirmed": False,
+            "should_continue": False,
+        }
+        _emit_battle_state_with_payload("battle_response", pl)
+        return {"ok": True, "payload": pl}
+
+    if n > MAX_F603_LOGIN_PROTECT_RETRY:
+        mark_battle_error(
+            f"连续收到「{_BATTLE_PROTECT_TIME_HINT}」相关提示已超过 {MAX_F603_LOGIN_PROTECT_RETRY} 次重试上限"
+        )
+        pl = {
+            **_base_battle_payload(packet_hex),
+            "packet_type": packet_kind,
+            "login_protect": True,
+            "login_protect_exhausted": True,
+            "is_end_confirmed": False,
+            "should_continue": False,
+        }
+        _emit_battle_state_with_payload("battle_response", pl)
+        return {"ok": True, "payload": pl}
+
+    _emit_control_log(
+        f"战斗被保护时间拦截（{packet_kind}）：{_F603_LOGIN_PROTECT_RETRY_DELAY_S:.0f}s 后重发 f603（第 {n}/{MAX_F603_LOGIN_PROTECT_RETRY} 次重试）",
+        level="warn",
+        scope="battle",
+    )
+    _set_battle_state(
+        wait_deadline_ts=now + _F603_LOGIN_PROTECT_RETRY_DELAY_S + DE07_TIMEOUT_S + 1.0,
+        last_response_ts=now,
+        last_result={
+            "login_protect": True,
+            "protect_time": True,
+            "raw_text": text,
+            "retry_index": n,
+            "retry_max": MAX_F603_LOGIN_PROTECT_RETRY,
+            "packet_kind": packet_kind,
+        },
+    )
+    time.sleep(_F603_LOGIN_PROTECT_RETRY_DELAY_S)
+
+    try:
+        built = build_start_battle_packet(monster)
+    except ValueError as e:
+        mark_battle_error(str(e))
+        pl = {
+            **_base_battle_payload(packet_hex),
+            "packet_type": packet_kind,
+            "login_protect": True,
+            "is_end_confirmed": False,
+            "should_continue": False,
+        }
+        _emit_battle_state_with_payload("battle_response", pl)
+        return {"ok": True, "payload": pl}
+
+    res = send_raw_action(built["packet_hex"], priority=10, use_queue=True)
+    if not res.get("ok"):
+        mark_battle_error(res.get("error", "重发 f603 失败"))
+        pl = {
+            **_base_battle_payload(packet_hex),
+            "packet_type": packet_kind,
+            "login_protect": True,
+            "is_end_confirmed": False,
+            "should_continue": False,
+        }
+        _emit_battle_state_with_payload("battle_response", pl)
+        return {"ok": True, "payload": pl}
+
+    mark_battle_started(built["monster_code"])
+    pl = {
+        **_base_battle_payload(packet_hex),
+        "packet_type": packet_kind,
+        "login_protect": True,
+        "protect_time": True,
+        "login_protect_resent_f603": True,
+        "retry_index": n,
+        "retry_max": MAX_F603_LOGIN_PROTECT_RETRY,
+        "raw_text": text,
+        "is_end_confirmed": False,
+        "should_continue": False,
+        "has_reward": False,
+        "no_energy": False,
+        "battle_ended": False,
+        "exp": None,
+        "gold": None,
+    }
+    _emit_battle_state_with_payload("battle_response", pl)
+    return {"ok": True, "payload": pl}
+
+
 def handle_battle_server_packet(packet_hex: str) -> Dict[str, Any]:
     """统一处理战斗下行 e207 / de07 / df07，并在允许时自动推进 f703。"""
     fingerprint = packet_hex[8:20] if len(packet_hex) >= 20 else ""
@@ -1199,8 +1364,14 @@ def handle_battle_server_packet(packet_hex: str) -> Dict[str, Any]:
             session = get_session()
             with session._lock:
                 session.battle_f703_timeout_recover_count = 0
+        protect_res = _maybe_handle_battle_protect_time_resend_f603(packet_hex, packet_kind="de07")
+        if protect_res is not None:
+            return protect_res
         payload = parse_battle_response(packet_hex)
     elif "df07" in fingerprint:
+        protect_res = _maybe_handle_battle_protect_time_resend_f603(packet_hex, packet_kind="df07")
+        if protect_res is not None:
+            return protect_res
         payload = parse_battle_end(packet_hex)
     else:
         return {"ok": False, "error": "非战斗报文"}
