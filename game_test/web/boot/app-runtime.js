@@ -30,7 +30,7 @@ let autoUseRules = [];
 let controlState = { auto_reconnect_enabled: false, reconnect_state: 'idle', reconnect_attempts: 0, reconnect_max_attempts: 0, reconnect_last_error: '', reconnect_next_retry_in: null, reconnect_banned_wait_in: null };
 /** 与后端 config.DEFAULT_BATTLE_LOOP_DELAY_MS 同步，由 /api/status 的 default_battle_loop_delay_ms 写入 */
 let serverDefaultBattleLoopDelayMs = null;
-let battleState = { state: 'idle', in_progress: false, mode: 'idle', loop_running: false, current_monster: '', loop_monster_code: '', loop_delay_ms: 0, total_count: 0, total_exp: 0, total_gold_copper: 0 };
+let battleState = { state: 'idle', in_progress: false, loop_running: false, current_monster: '', loop_monster_code: '', loop_delay_ms: 0, total_count: 0, total_exp: 0, total_gold_copper: 0 };
 let lastStatusData = { connected: false, connection_status: 'disconnected', role: null, server_name: '' };
 let teleportDestinationsCache = [];
 const TELEPORT_PACKET_TEMPLATE = '18000000e80303004428{random_num}f5054728000006000000{destination}0000';
@@ -165,6 +165,7 @@ function updateBattleState(data) {
     }
   }
   updateCurrentMonster();
+  updateBattleStateText();
   updateBattleStatsText();
   syncBattleLoopButton();
   renderTopbarStatus(lastStatusData);
@@ -1535,6 +1536,19 @@ function updateBattleStatsText() {
   const g = formatGoldFromCopper(battleState.total_gold_copper || 0);
   document.getElementById('battle-stats').textContent =
     `总战斗次数: ${Number(battleState.total_count || 0)} / 总获得经验: ${Number(battleState.total_exp || 0)} / 总获得金币: ${g}`;
+}
+
+function updateBattleStateText() {
+  const el = document.getElementById('battle-state-text');
+  if (!el) return;
+  const labels = {
+    idle: '空闲',
+    waiting_de07: '等待战斗启动响应',
+    waiting_df07: '战斗进行中',
+    cooldown: '等待下一轮',
+    error: '错误',
+  };
+  el.textContent = labels[battleState.state] || String(battleState.state || '空闲');
 }
 
 function parseGoldToCopperFromText(text) {

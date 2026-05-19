@@ -14,8 +14,8 @@ elif __name__ == "game_test.backend.runtime.flow":
 
 from game_test.backend.domain.auth.login import build_login_packet, parse_login_response
 from game_test.backend.domain.combat.battle import (
-    BATTLE_STATE_ENDED,
-    BATTLE_STATE_WAITING_START_RESPONSE,
+    BATTLE_STATE_COOLDOWN,
+    BATTLE_STATE_WAITING_DE07,
     MAX_F603_START_TIMEOUT_RECOVER,
     MAX_F703_TIMEOUT_RECOVER,
     clear_battle_wait_deadline,
@@ -327,7 +327,7 @@ def _control_worker_tick(now: float) -> None:
         battle_state = get_battle_state_snapshot()
         st = str(battle_state.get("state") or "")
         clear_battle_wait_deadline()
-        if st == BATTLE_STATE_WAITING_START_RESPONSE:
+        if st == BATTLE_STATE_WAITING_DE07:
             res = recover_battle_wait_timeout_resend_f603()
             if res.get("ok"):
                 n = res.get("recover_count", 0)
@@ -363,7 +363,7 @@ def _control_worker_tick(now: float) -> None:
     if (
         session.connected
         and battle_state.get("loop_running")
-        and battle_state.get("state") in (BATTLE_STATE_ENDED, "idle")
+        and battle_state.get("state") == BATTLE_STATE_COOLDOWN
         and next_start_ts > 0
         and now >= next_start_ts
         and control_state.get("reconnect_state") == "idle"

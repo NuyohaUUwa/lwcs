@@ -70,14 +70,12 @@ class GameSession:
         self.battle_in_progress: bool = False
         self.battle_current_monster: str = ""
         self.battle_last_action: str = ""
-        self.battle_can_create_next: bool = False
         self.battle_last_response_ts: float = 0.0
         self.battle_round_seq: int = 0
         self.battle_last_result: Dict[str, Any] = {}
         self.battle_loop_running: bool = False
         self.battle_loop_delay_ms: int = DEFAULT_BATTLE_LOOP_DELAY_MS
         self.battle_loop_timer = None
-        self.battle_mode: str = "idle"
         self.battle_loop_monster_code: str = ""
         self.battle_wait_deadline_ts: float = 0.0
         self.battle_next_start_ts: float = 0.0
@@ -279,11 +277,9 @@ class GameSession:
                 "in_progress": self.battle_in_progress,
                 "current_monster": self.battle_current_monster,
                 "last_action": self.battle_last_action,
-                "can_create_next": self.battle_can_create_next,
                 "last_response_ts": self.battle_last_response_ts,
                 "round_seq": self.battle_round_seq,
                 "last_result": dict(self.battle_last_result),
-                "mode": self.battle_mode,
                 "loop_running": self.battle_loop_running,
                 "loop_monster_code": self.battle_loop_monster_code,
                 "loop_delay_ms": self.battle_loop_delay_ms,
@@ -376,11 +372,9 @@ class GameSession:
                 "in_progress": self.battle_in_progress,
                 "current_monster": self.battle_current_monster,
                 "last_action": self.battle_last_action,
-                "can_create_next": self.battle_can_create_next,
                 "last_response_ts": self.battle_last_response_ts,
                 "round_seq": self.battle_round_seq,
                 "last_result": dict(self.battle_last_result),
-                "mode": self.battle_mode,
                 "loop_running": self.battle_loop_running,
                 "loop_monster_code": self.battle_loop_monster_code,
                 "loop_delay_ms": self.battle_loop_delay_ms,
@@ -425,11 +419,9 @@ class GameSession:
             self.battle_in_progress = False
             self.battle_current_monster = ""
             self.battle_last_action = ""
-            self.battle_can_create_next = False
             self.battle_last_response_ts = 0.0
             self.battle_round_seq = 0
             self.battle_last_result = {}
-            self.battle_mode = "idle"
             self.battle_loop_running = False
             self.battle_loop_monster_code = ""
             self.battle_loop_delay_ms = DEFAULT_BATTLE_LOOP_DELAY_MS

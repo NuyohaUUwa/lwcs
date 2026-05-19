@@ -286,10 +286,9 @@ def dispatch_feature_action(action_name: str, payload: dict[str, Any]) -> dict[s
         if not res.get("ok"):
             return res
         battle._set_battle_state(
-            state=battle.BATTLE_STATE_WAITING_ACTION_RESULT,
+            state=battle.BATTLE_STATE_WAITING_DF07,
             in_progress=True,
             last_action="f703",
-            can_create_next=False,
             last_result={"source": "manual_api", "sent": "f703", "random_num": built["random_num"]},
         )
         result = {"ok": True, "queued": 1, **built, "battle_state": battle.get_battle_state_snapshot()}

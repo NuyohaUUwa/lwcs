@@ -15,7 +15,7 @@ from game_test.core.codec import split_game_frame_bytes
 from game_test.backend.domain.packet.probe import record_packet
 
 _F703_PACKET_MARK = "e8030500f703"
-_BATTLE_WAITING_STATES = {"waiting_start_response", "waiting_action_result"}
+_BATTLE_WAITING_STATES = {"waiting_df07"}
 
 
 def _get_connected_socket() -> socket.socket:
