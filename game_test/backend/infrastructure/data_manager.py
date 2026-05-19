@@ -10,7 +10,7 @@ import time
 from game_test.backend.domain.combat.battle import DEFAULT_MONSTERS
 from game_test.backend.runtime import get_session
 
-from .paths import BUY_ITEMS_FILE, LIAOGUO_PAIRS_FILE, MONSTERS_FILE, QUICK_LOGINS_FILE
+from .paths import BUY_ITEMS_FILE, LIAOGUO_PAIRS_FILE, MONSTERS_FILE, QUICK_LOGINS_FILE, SCHEDULED_TASKS_FILE
 
 _CURRENT_MODULE = sys.modules[__name__]
 if __name__ == "backend.infrastructure.data_manager":
@@ -299,6 +299,23 @@ def delete_liaoguo_pair(item_id: str):
     return {"ok": True, "items": new_items}
 
 
+DEFAULT_SCHEDULED_TASKS_CONFIG = {
+    "daily_checkin": {"enabled": False, "times": [], "run_on_login": False},
+    "transport_supply": {"enabled": False, "times": []},
+    "world_boss": {"enabled": False, "times": []},
+    "liaoguo": {"enabled": False, "time": "", "pair_ids": []},
+}
+
+
+def load_scheduled_tasks_config():
+    data = _read_json_file(SCHEDULED_TASKS_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_scheduled_tasks_config(config: dict):
+    _write_json_file(SCHEDULED_TASKS_FILE, config)
+
+
 __all__ = [
     "get_monsters",
     "save_monsters",
@@ -314,4 +331,7 @@ __all__ = [
     "save_liaoguo_pairs",
     "upsert_liaoguo_pair",
     "delete_liaoguo_pair",
+    "DEFAULT_SCHEDULED_TASKS_CONFIG",
+    "load_scheduled_tasks_config",
+    "save_scheduled_tasks_config",
 ]

@@ -20,6 +20,7 @@ let selectedBuyItemCode = '';
 let starStoneLoopRunning = false;
 let synthesisBatchRunning = false;
 let transportSupplyRunning = false;
+let worldBossRunning = false;
 let liaoguoRunning = false;
 let liaoguoPairs = [];
 let selectedLiaoguoPairKey = '';
@@ -1428,6 +1429,11 @@ function onControlLog(data) {
     appendLiaoguoLog(data.message, kind);
     return;
   }
+  if (data.scope === 'world_boss') {
+    const kind = data.level === 'err' ? 'err' : data.level === 'ok' ? 'ok' : 'info';
+    appendWorldBossLog(data.message, kind);
+    return;
+  }
   if (data.scope === 'synthesis_batch') {
     const kind = data.level === 'err' ? 'err' : data.level === 'ok' ? 'ok' : 'info';
     appendSynthesisBatchLog(data.message, kind);
@@ -1446,6 +1452,10 @@ function onFlowStatus(data) {
   if (typeof data.transport_supply_running === 'boolean') {
     transportSupplyRunning = data.transport_supply_running;
     updateTransportSupplyButton();
+  }
+  if (typeof data.world_boss_running === 'boolean') {
+    worldBossRunning = data.world_boss_running;
+    updateWorldBossButton();
   }
   if (typeof data.liaoguo_running === 'boolean') {
     liaoguoRunning = data.liaoguo_running;
@@ -2045,6 +2055,25 @@ function clearTransportSupplyLog() {
   box.innerHTML = '';
 }
 
+function appendWorldBossLog(text, kind = 'info') {
+  const box = document.getElementById('tool-world-boss-log');
+  if (!box) return;
+  if (box.querySelector('.text-muted.text-sm') && box.children.length === 1) {
+    box.innerHTML = '';
+  }
+  const line = document.createElement('div');
+  line.className = kind === 'err' ? 'text-red' : kind === 'ok' ? 'text-green' : 'text-muted';
+  line.textContent = text;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearWorldBossLog() {
+  const box = document.getElementById('tool-world-boss-log');
+  if (!box) return;
+  box.innerHTML = '';
+}
+
 function appendLiaoguoLog(text, kind = 'info') {
   const box = document.getElementById('tool-liaoguo-log');
   if (!box) return;
@@ -2069,6 +2098,13 @@ function updateTransportSupplyButton() {
   if (!btn) return;
   btn.textContent = transportSupplyRunning ? '停止运输物资' : '开始运输物资';
   btn.className = transportSupplyRunning ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+}
+
+function updateWorldBossButton() {
+  const btn = document.getElementById('btn-world-boss');
+  if (!btn) return;
+  btn.textContent = worldBossRunning ? '停止世界 BOSS' : '启动世界 BOSS';
+  btn.className = worldBossRunning ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
 }
 
 function updateLiaoguoButton() {
@@ -2259,6 +2295,17 @@ async function refreshTransportSupplyStatus(silent = true) {
   return true;
 }
 
+async function refreshWorldBossStatus(silent = true) {
+  const res = await api('GET', '/api/flow/world-boss/status').catch(() => null);
+  if (!res?.ok) {
+    if (!silent) setToolResult(res?.error || '读取世界 BOSS 状态失败', 'err');
+    return false;
+  }
+  worldBossRunning = !!res.running;
+  updateWorldBossButton();
+  return true;
+}
+
 async function toggleTransportSupplyFlow() {
   const isStarting = !transportSupplyRunning;
   if (isStarting) clearTransportSupplyLog();
@@ -2274,6 +2321,23 @@ async function toggleTransportSupplyFlow() {
   }
   setToolResult(`运输物资：已请求${actionText}`, 'ok');
   await refreshTransportSupplyStatus(true);
+}
+
+async function toggleWorldBossFlow() {
+  const isStarting = !worldBossRunning;
+  if (isStarting) clearWorldBossLog();
+  const endpoint = worldBossRunning
+    ? '/api/flow/world-boss/stop'
+    : '/api/flow/world-boss/start';
+  const actionText = worldBossRunning ? '停止' : '启动';
+  const res = await api('POST', endpoint).catch(() => null);
+  if (!res?.ok) {
+    setToolResult(`世界 BOSS：${actionText}失败 — ${res?.error || '未知错误'}`, 'err');
+    await refreshWorldBossStatus(true);
+    return;
+  }
+  setToolResult(`世界 BOSS：已请求${actionText}`, 'ok');
+  await refreshWorldBossStatus(true);
 }
 
 async function loadToolTeleportOptions() {
@@ -2555,6 +2619,7 @@ function toggleCollapseMode() {
   syncBackpackSelectionUi();
   await refreshLiaoguoStatus(true);
   await refreshTransportSupplyStatus(true);
+  await refreshWorldBossStatus(true);
   await loadToolTeleportOptions();
   updateBattleStatsText();
 })();

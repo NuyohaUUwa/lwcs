@@ -462,6 +462,10 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
     utf8_text: str | None = None
     if "ed07" in fingerprint or "e607" in fingerprint or "ec07" in fingerprint:
         utf8_text = extract_utf8_segments(hex_str)
+    if fingerprint in ("e8030100e607", "e8030100f207"):
+        from game_test.backend.application.flow_service import handle_world_boss_packet
+
+        handle_world_boss_packet(hex_str)
     if _is_banned_role_packet(hex_str):
         _handle_banned_role_packet()
         return

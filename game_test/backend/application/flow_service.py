@@ -1,4 +1,4 @@
-"""HTTP-facing complex flow façade (star-stone, transport-supply, liaoguo, synthesis-batch)."""
+"""HTTP-facing complex flow façade (star-stone, transport-supply, liaoguo, synthesis-batch, world-boss)."""
 
 import queue
 import threading
@@ -32,12 +32,207 @@ def _emit_flow_status() -> None:
         lg_running = _liaoguo_state.running
     with _synthesis_batch_state.lock:
         sb_running = _synthesis_batch_state.running
+    with _world_boss_state.lock:
+        wb_running = _world_boss_state.running
     session._notify_sse("flow_status", {
         "star_stone_running": ss_running,
         "transport_supply_running": ts_running,
         "liaoguo_running": lg_running,
         "synthesis_batch_running": sb_running,
+        "world_boss_running": wb_running,
     })
+
+
+# =============================================================================
+# World Boss
+# =============================================================================
+_WORLD_BOSS_PACKET_HEX = "27000000e8030d00fe0367e7f505100400001500000038900d0002ff5f0d00000000000000000001000000"
+_WORLD_BOSS_INTERVAL_S = 1.5
+_WORLD_BOSS_DEAD_FP = "e8030100e607"
+_WORLD_BOSS_DEAD_HEX = "424f5353e5b7b2e8a2abe587bbe6af81efbc81"
+_WORLD_BOSS_DEAD_TEXT = "BOSS已被击毙！"
+_WORLD_BOSS_SETTLEMENT_FP = "e8030100f207"
+_WORLD_BOSS_SETTLEMENT_START_MARKERS = (
+    "e7b3bbe7bb9fe585ace5918a",
+    "e7b3bbe7bb9fe68f90e7a4ba",
+    "e38090",
+)
+_WORLD_BOSS_DAMAGE_HEX = "e682a8e5afb9424f5353e79a84e4bca4e5aeb3efbc9a"
+_WORLD_BOSS_HP_HEX = "e5bd93e5898d424f5353e589a9e4bd99e8a180e9878fefbc9a"
+_DAILY_CHECKIN_PACKET_HEX = "20000000e80313007d2e08f4f505882e00000e0000000c00636865636b496e446f3f7b7d"
+
+
+def _emit_tool_log(message: str, *, level: str = "info") -> None:
+    _emit_flow_log("tools", message, level=level)
+
+
+def send_daily_checkin(*, source: str = "manual") -> dict[str, Any]:
+    session = get_session()
+    if not session.connected or not session.sock:
+        return {"ok": False, "error": "未连接游戏服"}
+    res = send_raw_action(_DAILY_CHECKIN_PACKET_HEX, priority=10, use_queue=True)
+    if not res.get("ok"):
+        _emit_tool_log(f"每日签到发送失败：{res.get('error', '未知错误')}", level="err")
+        return res
+    label = "登录自动签到" if source == "login" else "定时签到" if source == "scheduled" else "每日签到"
+    _emit_tool_log(f"{label}：已发送签到报文", level="ok")
+    return {"ok": True, "source": source, "queued": res.get("queued", 0), "sent_bytes": res.get("sent_bytes", 0)}
+
+
+class _WorldBossState:
+    def __init__(self):
+        self.running = False
+        self.loop_count = 0
+        self.settlement_messages: list[str] = []
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+
+
+_world_boss_state = _WorldBossState()
+_world_boss_thread: threading.Thread | None = None
+
+
+def _emit_world_boss_log(message: str, *, level: str = "info") -> None:
+    _emit_flow_log("world_boss", message, level=level)
+
+
+def get_world_boss_status() -> dict[str, Any]:
+    with _world_boss_state.lock:
+        return {
+            "ok": True,
+            "running": _world_boss_state.running,
+            "loop_count": _world_boss_state.loop_count,
+            "settlement_messages": list(_world_boss_state.settlement_messages),
+        }
+
+
+def _append_world_boss_settlement(message: str) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+    with _world_boss_state.lock:
+        _world_boss_state.settlement_messages.append(text)
+        if len(_world_boss_state.settlement_messages) > 100:
+            _world_boss_state.settlement_messages = _world_boss_state.settlement_messages[-100:]
+
+
+def _extract_world_boss_e607_text(packet_hex: str) -> str:
+    try:
+        data = bytes.fromhex(packet_hex)
+    except ValueError:
+        return ""
+    start = min(10, len(data))
+    for i in range(start, max(start, len(data) - 3)):
+        if data[i:i + 2] != b"\x02\x00":
+            continue
+        size = int.from_bytes(data[i + 2:i + 4], "little")
+        if size < 4:
+            continue
+        chunk = data[i + 4:i + 4 + size]
+        if len(chunk) != size:
+            continue
+        text = chunk.decode("utf-8", errors="replace")
+        if "\ufffd" in text:
+            continue
+        if any(ord(ch) > 0x7f for ch in text):
+            return text
+    return ""
+
+
+def _extract_world_boss_f207_text(packet_hex: str) -> str:
+    packet_hex_l = packet_hex.lower()
+    starts = [packet_hex_l.find(marker) for marker in _WORLD_BOSS_SETTLEMENT_START_MARKERS]
+    starts = [pos for pos in starts if pos >= 0]
+    if not starts:
+        return ""
+    start = min(starts)
+    end = packet_hex_l.find("ff000000", start)
+    if end < 0:
+        end = len(packet_hex_l)
+    else:
+        end = max(start, end - 4)
+    body_hex = packet_hex_l[start:end]
+    if len(body_hex) % 2:
+        body_hex = body_hex[:-1]
+    try:
+        return bytes.fromhex(body_hex).decode("utf-8", errors="ignore").strip("\x00 \r\n\t")
+    except ValueError:
+        return ""
+
+
+def _stop_world_boss_internal() -> None:
+    with _world_boss_state.lock:
+        _world_boss_state.running = False
+    _world_boss_state.stop_event.set()
+    _emit_flow_status()
+
+
+def _run_world_boss_loop() -> None:
+    while not _world_boss_state.stop_event.is_set():
+        res = send_raw_action(_WORLD_BOSS_PACKET_HEX, priority=10, use_queue=True)
+        with _world_boss_state.lock:
+            if _world_boss_state.running:
+                _world_boss_state.loop_count += 1
+                loop_count = _world_boss_state.loop_count
+            else:
+                loop_count = _world_boss_state.loop_count
+        if not res.get("ok"):
+            _emit_world_boss_log(f"发送失败：{res.get('error', '未知错误')}", level="err")
+            _stop_world_boss_internal()
+            return
+        _emit_world_boss_log(f"第 {loop_count} 次：已发送世界 BOSS 报文", level="info")
+        _world_boss_state.stop_event.wait(_WORLD_BOSS_INTERVAL_S)
+
+    _emit_world_boss_log("世界 BOSS 循环已停止", level="info")
+    _emit_flow_status()
+
+
+def start_world_boss() -> dict[str, Any]:
+    global _world_boss_thread
+    if _world_boss_state.running:
+        return {"ok": True}
+    session = get_session()
+    if not session.connected or not session.sock:
+        return {"ok": False, "error": "未连接游戏服"}
+    with _world_boss_state.lock:
+        _world_boss_state.running = True
+        _world_boss_state.loop_count = 0
+        _world_boss_state.settlement_messages = []
+        _world_boss_state.stop_event.clear()
+    _emit_world_boss_log("世界 BOSS 循环已启动（每 1500ms 发送一次）", level="ok")
+    _world_boss_thread = threading.Thread(target=_run_world_boss_loop, daemon=True, name="world-boss-loop")
+    _world_boss_thread.start()
+    _emit_flow_status()
+    return {"ok": True}
+
+
+def stop_world_boss() -> dict[str, Any]:
+    _stop_world_boss_internal()
+    _emit_world_boss_log("已请求停止世界 BOSS 循环", level="info")
+    return {"ok": True}
+
+
+def handle_world_boss_packet(packet_hex: str) -> bool:
+    packet_hex_l = str(packet_hex or "").lower()
+    if len(packet_hex_l) < 20:
+        return False
+    fingerprint = packet_hex_l[8:20]
+    if fingerprint == _WORLD_BOSS_DEAD_FP and _WORLD_BOSS_DEAD_HEX in packet_hex_l:
+        message = _extract_world_boss_e607_text(packet_hex_l) or _WORLD_BOSS_DEAD_TEXT
+        _append_world_boss_settlement(message)
+        _emit_world_boss_log(f"结算：{message}", level="ok")
+        _stop_world_boss_internal()
+        return True
+    if fingerprint == _WORLD_BOSS_SETTLEMENT_FP:
+        if _WORLD_BOSS_DAMAGE_HEX not in packet_hex_l or _WORLD_BOSS_HP_HEX not in packet_hex_l:
+            return False
+        message = _extract_world_boss_f207_text(packet_hex_l)
+        if not message:
+            return False
+        _append_world_boss_settlement(message)
+        _emit_world_boss_log(f"伤害结算：{message}", level="ok")
+        return True
+    return False
 
 
 # =============================================================================
