@@ -2227,6 +2227,7 @@ function renderScheduledTasksConfig(config) {
   setCheckboxValue('sched-daily-login', daily.run_on_login);
   setCheckboxValue('sched-transport-enabled', transport.enabled);
   setInputValue('sched-transport-times', Array.isArray(transport.times) ? transport.times.join(',') : '');
+  setCheckboxValue('tool-transport-auto-use-gold-ticket', transport.auto_use_gold_ticket);
   setCheckboxValue('sched-world-boss-enabled', worldBoss.enabled);
   setInputValue('sched-world-boss-times', Array.isArray(worldBoss.times) ? worldBoss.times.join(',') : '');
   setCheckboxValue('sched-liaoguo-enabled', liaoguo.enabled);
@@ -2256,6 +2257,7 @@ async function saveScheduledTasksConfig() {
     transport_supply: {
       enabled: getCheckboxValue('sched-transport-enabled'),
       times: parseScheduleTimesInput(document.getElementById('sched-transport-times')?.value || ''),
+      auto_use_gold_ticket: getCheckboxValue('tool-transport-auto-use-gold-ticket'),
     },
     world_boss: {
       enabled: getCheckboxValue('sched-world-boss-enabled'),
@@ -2401,7 +2403,10 @@ async function toggleTransportSupplyFlow() {
     ? '/api/flow/transport-supply/stop'
     : '/api/flow/transport-supply/start';
   const actionText = transportSupplyRunning ? '停止' : '启动';
-  const res = await api('POST', endpoint).catch(() => null);
+  const body = transportSupplyRunning
+    ? {}
+    : { auto_use_gold_ticket: getCheckboxValue('tool-transport-auto-use-gold-ticket') };
+  const res = await api('POST', endpoint, body).catch(() => null);
   if (!res?.ok) {
     setToolResult(`运输物资：${actionText}失败 — ${res?.error || '未知错误'}`, 'err');
     await refreshTransportSupplyStatus(true);

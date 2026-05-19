@@ -221,11 +221,16 @@ def handle_world_boss_packet(packet_hex: str) -> bool:
     if len(packet_hex_l) < 20:
         return False
     fingerprint = packet_hex_l[8:20]
-    if fingerprint == _WORLD_BOSS_DEAD_FP and _WORLD_BOSS_DEAD_HEX in packet_hex_l:
-        message = _extract_world_boss_e607_text(packet_hex_l) or _WORLD_BOSS_DEAD_TEXT
-        _append_world_boss_settlement(message)
-        _emit_world_boss_log(f"结算：{message}", level="ok")
-        _stop_world_boss_internal()
+    if fingerprint == _WORLD_BOSS_DEAD_FP:
+        message = _extract_world_boss_e607_text(packet_hex_l)
+        if _WORLD_BOSS_DEAD_HEX in packet_hex_l:
+            message = message or _WORLD_BOSS_DEAD_TEXT
+            _append_world_boss_settlement(message)
+            _emit_world_boss_log(f"结算：{message}", level="ok")
+            _stop_world_boss_internal()
+            return True
+        if message:
+            _emit_world_boss_log(f"服务器响应：{message}", level="info")
         return True
     if fingerprint == _WORLD_BOSS_SETTLEMENT_FP:
         if _WORLD_BOSS_DAMAGE_HEX not in packet_hex_l or _WORLD_BOSS_HP_HEX not in packet_hex_l:
@@ -525,6 +530,7 @@ class _TransportSupplyState:
         self.running = False
         self.stop_event = threading.Event()
         self.pending_reward_uses = 0
+        self.auto_use_gold_ticket = False
         self.lock = threading.Lock()
 
 
@@ -538,6 +544,7 @@ def get_transport_supply_status() -> dict[str, Any]:
             "ok": True,
             "running": _transport_supply_state.running,
             "pending_reward_uses": _transport_supply_state.pending_reward_uses,
+            "auto_use_gold_ticket": _transport_supply_state.auto_use_gold_ticket,
         }
 
 
@@ -652,7 +659,12 @@ def _run_transport_supply_loop() -> None:
         if _transport_supply_state.stop_event.wait(timeout=0):
             break
 
-        _emit_transport_log("等待 65 秒后交付物资…（期间自动使用上一轮奖励）", level="info")
+        with _transport_supply_state.lock:
+            auto_use_gold_ticket = _transport_supply_state.auto_use_gold_ticket
+        wait_msg = "等待 65 秒后交付物资…"
+        if auto_use_gold_ticket:
+            wait_msg += "（期间自动使用上一轮奖励）"
+        _emit_transport_log(wait_msg, level="info")
         waited = _wait_with_reward_poll(_TRANSPORT_SUPPLY_WAIT_BUY_MS, round_num)
         if not waited:
             _emit_transport_log("已停止（等待交付阶段中断）", level="info")
@@ -690,16 +702,19 @@ def _run_transport_supply_loop() -> None:
             _emit_transport_log(f"第 {round_num} 轮：等待完成响应超时", level="err")
             break
 
-        _transport_supply_state.pending_reward_uses += 1
-        if round_num == _TRANSPORT_SUPPLY_MAX_ROUNDS:
-            last_res = _try_auto_use_reward_once()
-            if last_res["ok"] and last_res["used"]:
-                _transport_supply_state.pending_reward_uses = max(0, _transport_supply_state.pending_reward_uses - 1)
-                _emit_transport_log(f"最后一轮奖励已自动使用：{last_res['item_name']}×1", level="ok")
-            elif last_res["reason"] == "not_found":
-                _emit_transport_log(f"最后一轮未在背包找到「{_TRANSPORT_SUPPLY_REWARD_NAME}」", level="err")
+        if auto_use_gold_ticket:
+            _transport_supply_state.pending_reward_uses += 1
+            if round_num == _TRANSPORT_SUPPLY_MAX_ROUNDS:
+                last_res = _try_auto_use_reward_once()
+                if last_res["ok"] and last_res["used"]:
+                    _transport_supply_state.pending_reward_uses = max(0, _transport_supply_state.pending_reward_uses - 1)
+                    _emit_transport_log(f"最后一轮奖励已自动使用：{last_res['item_name']}×1", level="ok")
+                elif last_res["reason"] == "not_found":
+                    _emit_transport_log(f"最后一轮未在背包找到「{_TRANSPORT_SUPPLY_REWARD_NAME}」", level="err")
+            else:
+                _emit_transport_log(f"第 {round_num} 轮奖励入队：下一轮等待阶段自动使用", level="info")
         else:
-            _emit_transport_log(f"第 {round_num} 轮奖励入队：下一轮等待阶段自动使用", level="info")
+            _emit_transport_log(f"第 {round_num} 轮奖励不自动使用（已关闭自动使用金票）", level="info")
 
     with _transport_supply_state.lock:
         if _transport_supply_state.pending_reward_uses > 0:
@@ -710,7 +725,7 @@ def _run_transport_supply_loop() -> None:
     _emit_flow_status()
 
 
-def start_transport_supply() -> dict[str, Any]:
+def start_transport_supply(auto_use_gold_ticket: bool = False) -> dict[str, Any]:
     global _transport_supply_thread
     if _transport_supply_state.running:
         return {"ok": True}
@@ -718,6 +733,7 @@ def start_transport_supply() -> dict[str, Any]:
     with _transport_supply_state.lock:
         _transport_supply_state.running = True
         _transport_supply_state.pending_reward_uses = 0
+        _transport_supply_state.auto_use_gold_ticket = bool(auto_use_gold_ticket)
         _transport_supply_state.stop_event.clear()
 
     _transport_supply_thread = threading.Thread(target=_run_transport_supply_loop, daemon=True, name="transport-supply-loop")

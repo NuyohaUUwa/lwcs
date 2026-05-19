@@ -38,6 +38,7 @@ _INSTANCE_JSON_NAMES = (
     "liaoguo_pairs.json",
     "auto_use_rules.json",
     "annotations.json",
+    "scheduled_tasks.json"
 )
 _SHARED_JSON_NAMES = (
     "monsters.json",

@@ -80,6 +80,8 @@ def _normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
         src = raw.get(key) if isinstance(raw.get(key), dict) else {}
         cfg[key]["enabled"] = bool(src.get("enabled", False))
         cfg[key]["times"] = _normalize_times(src.get("times", []))
+    transport_src = raw.get("transport_supply") if isinstance(raw.get("transport_supply"), dict) else {}
+    cfg["transport_supply"]["auto_use_gold_ticket"] = bool(transport_src.get("auto_use_gold_ticket", False))
     daily_src = raw.get("daily_checkin") if isinstance(raw.get("daily_checkin"), dict) else {}
     cfg["daily_checkin"]["run_on_login"] = bool(daily_src.get("run_on_login", False))
 
@@ -313,7 +315,14 @@ def tick_scheduled_tasks(now: float) -> None:
 
     transport = config["transport_supply"]
     if transport["enabled"] and hhmm in transport["times"] and should_fire("transport_supply", hhmm):
-        _launch("transport_supply", hhmm, _run_waiting_feature, "transport_supply", "运输物资", start_transport_supply)
+        _launch(
+            "transport_supply",
+            hhmm,
+            _run_waiting_feature,
+            "transport_supply",
+            "运输物资",
+            lambda: start_transport_supply(auto_use_gold_ticket=bool(transport.get("auto_use_gold_ticket", False))),
+        )
 
     world_boss = config["world_boss"]
     if world_boss["enabled"] and hhmm in world_boss["times"] and should_fire("world_boss", hhmm):

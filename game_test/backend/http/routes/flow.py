@@ -49,7 +49,8 @@ def api_star_stone_status():
 
 @blueprint.route("/flow/transport-supply/start", methods=["POST"])
 def api_transport_supply_start():
-    return _json_ok(start_transport_supply())
+    body = get_json_body()
+    return _json_ok(start_transport_supply(auto_use_gold_ticket=bool(body.get("auto_use_gold_ticket", False))))
 
 
 @blueprint.route("/flow/transport-supply/stop", methods=["POST"])

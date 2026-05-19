@@ -301,7 +301,7 @@ def delete_liaoguo_pair(item_id: str):
 
 DEFAULT_SCHEDULED_TASKS_CONFIG = {
     "daily_checkin": {"enabled": False, "times": [], "run_on_login": False},
-    "transport_supply": {"enabled": False, "times": []},
+    "transport_supply": {"enabled": False, "times": [], "auto_use_gold_ticket": False},
     "world_boss": {"enabled": False, "times": []},
     "liaoguo": {"enabled": False, "time": "", "pair_ids": []},
 }
