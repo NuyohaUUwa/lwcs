@@ -6,6 +6,8 @@ const appApi = (method, path, body) => window.GameControllers.performJsonRequest
 let selectedServer = null;  // {name, ip, port}
 let selectedRoleId = null;
 let selectedItemId = null;
+/** 背包多选（点击选中/再点取消）；仅 1 件选中时与 selectedItemId 同步 */
+let selectedItemIds = new Set();
 let backpackItemsCache = [];
 let eventSource = null;
 let isConnected = false;
@@ -264,6 +266,7 @@ function updateStatus(data) {
   if (!data.connected) {
     backpackItemsCache = [];
     selectedItemId = null;
+    selectedItemIds.clear();
     const sc = document.getElementById('stats-content');
     if (sc) sc.innerHTML = '<span class="text-muted">等待数据...</span>';
   }
@@ -641,6 +644,7 @@ function resetToLoginState() {
   selectedServer = null;
   selectedRoleId = null;
   selectedItemId = null;
+  selectedItemIds.clear();
   document.getElementById('login-panel').style.display = '';
   document.getElementById('server-panel').style.display = 'none';
   document.getElementById('role-panel').style.display = 'none';
@@ -677,11 +681,17 @@ async function refreshBackpack() {
 function renderBackpack(items) {
   backpackItemsCache = Array.isArray(items) ? items : [];
   const grid = document.getElementById('backpack-grid');
-  if (selectedItemId && !backpackItemsCache.some((x) => x.item_id === selectedItemId)) {
-    selectedItemId = null;
+  const validIds = new Set(backpackItemsCache.map((x) => x.item_id));
+  for (const id of [...selectedItemIds]) {
+    if (!validIds.has(id)) selectedItemIds.delete(id);
   }
+  syncSelectedItemIdFromSet();
   syncBackpackActionQtyInput();
-  document.getElementById('backpack-count').textContent = `共 ${backpackItemsCache.length} 件`;
+  syncBackpackSelectionUi();
+  const countEl = document.getElementById('backpack-count');
+  const selN = selectedItemIds.size;
+  const base = `共 ${backpackItemsCache.length} 件`;
+  if (countEl) countEl.textContent = selN > 0 ? `${base} · 已选 ${selN} 件` : base;
   if (!backpackItemsCache.length) {
     grid.innerHTML = '<div class="text-muted text-sm">背包为空</div>';
     return;
@@ -690,23 +700,84 @@ function renderBackpack(items) {
   backpackItemsCache.forEach(item => {
     const d = document.createElement('div');
     d.className = 'item-card' + (item.can_disassemble ? ' can-decompose' : '');
-    if (item.item_id === selectedItemId) d.classList.add('selected');
+    d.dataset.itemId = item.item_id;
+    if (selectedItemIds.has(item.item_id)) {
+      d.classList.add('selected');
+      if (selectedItemIds.size > 1) d.classList.add('multi-selected');
+    }
     d.innerHTML = `<div class="item-name">${escHtml(item.name)}</div>
       <div class="item-qty">数量：${item.quantity}</div>
       <div class="item-id mono">${item.item_id}</div>`;
-    d.onclick = () => {
-      document.querySelectorAll('.item-card').forEach(x => x.classList.remove('selected'));
-      d.classList.add('selected');
-      selectedItemId = item.item_id;
-      syncBackpackActionQtyInput();
-    };
+    d.onclick = () => onBackpackItemClick(item.item_id);
     grid.appendChild(d);
   });
+}
+
+function syncSelectedItemIdFromSet() {
+  if (selectedItemIds.size === 1) {
+    selectedItemId = [...selectedItemIds][0];
+  } else {
+    selectedItemId = null;
+  }
+}
+
+function onBackpackItemClick(itemId) {
+  if (selectedItemIds.has(itemId)) selectedItemIds.delete(itemId);
+  else selectedItemIds.add(itemId);
+  syncSelectedItemIdFromSet();
+  updateBackpackCardSelection();
+  syncBackpackActionQtyInput();
+  syncBackpackSelectionUi();
+  const countEl = document.getElementById('backpack-count');
+  const selN = selectedItemIds.size;
+  const base = `共 ${backpackItemsCache.length} 件`;
+  if (countEl) countEl.textContent = selN > 0 ? `${base} · 已选 ${selN} 件` : base;
+}
+
+function updateBackpackCardSelection() {
+  const multi = selectedItemIds.size > 1;
+  document.querySelectorAll('#backpack-grid .item-card').forEach((card) => {
+    const id = card.dataset.itemId || '';
+    const on = selectedItemIds.has(id);
+    card.classList.toggle('selected', on);
+    card.classList.toggle('multi-selected', on && multi);
+  });
+}
+
+function isBackpackMultiSelect() {
+  return selectedItemIds.size > 1;
+}
+
+function syncBackpackSelectionUi() {
+  const multi = isBackpackMultiSelect();
+  const none = selectedItemIds.size === 0;
+  const batchLocked = synthesisBatchRunning;
+  document.querySelectorAll('[data-backpack-single-only="1"]').forEach((el) => {
+    el.disabled = batchLocked || none || multi;
+  });
+  document.querySelectorAll('[data-backpack-basic-action="1"]').forEach((el) => {
+    el.disabled = batchLocked || none;
+  });
+  const qtyWrap = document.getElementById('backpack-action-qty-wrap');
+  if (qtyWrap) qtyWrap.style.display = multi ? 'none' : '';
 }
 
 function getSelectedBackpackItem() {
   if (!selectedItemId) return null;
   return backpackItemsCache.find((x) => x.item_id === selectedItemId) || null;
+}
+
+function getSelectedBackpackItemsForAction() {
+  if (!selectedItemIds.size) {
+    showMsg('backpack-msg', '请先选择物品', 'err');
+    return null;
+  }
+  const items = backpackItemsCache.filter((x) => selectedItemIds.has(x.item_id));
+  if (!items.length) {
+    showMsg('backpack-msg', '所选物品已不在背包', 'err');
+    return null;
+  }
+  return items;
 }
 
 function getBackpackActionQuantity(actionText) {
@@ -744,27 +815,67 @@ function syncBackpackActionQtyInput() {
   }
 }
 
-async function useSelected() {
-  const quantity = getBackpackActionQuantity('使用');
+async function runBackpackActionOnSelection(action, apiPath, actionLabel) {
+  const items = getSelectedBackpackItemsForAction();
+  if (!items) return;
+  if (isBackpackMultiSelect()) {
+    let ok = 0;
+    let fail = 0;
+    let skipped = 0;
+    let lastErr = '';
+    for (const item of items) {
+      if (Number(item.quantity || 0) < 1) {
+        skipped += 1;
+        continue;
+      }
+      if (action === 'decompose' && !item.can_disassemble) {
+        skipped += 1;
+        continue;
+      }
+      const res = await api('POST', apiPath, { item_id: item.item_id, quantity: 1 });
+      if (res.ok) ok += 1;
+      else {
+        fail += 1;
+        lastErr = res.error || lastErr;
+      }
+    }
+    const parts = [`${actionLabel}：成功 ${ok} 件`];
+    if (fail) parts.push(`失败 ${fail} 件`);
+    if (skipped) parts.push(`跳过 ${skipped} 件`);
+    const level = ok > 0 ? 'ok' : 'err';
+    showMsg('backpack-msg', lastErr && fail && !ok ? `${parts.join('，')}（${lastErr}）` : parts.join('，'), level);
+    return;
+  }
+  const quantity = action === 'decompose' ? 1 : getBackpackActionQuantity(actionLabel);
   if (quantity == null) return;
-  const res = await api('POST', '/api/item/use', { item_id: selectedItemId, quantity });
-  showMsg('backpack-msg', res.ok ? withValidationWarning(`已加入发送队列 x${res.queued}`, res) : res.error, res.ok ? 'ok' : 'err');
+  const itemId = items[0].item_id;
+  const res = await api('POST', apiPath, { item_id: itemId, ...(action === 'decompose' ? {} : { quantity }) });
+  if (action === 'use') {
+    showMsg('backpack-msg', res.ok ? withValidationWarning(`已加入发送队列 x${res.queued}`, res) : res.error, res.ok ? 'ok' : 'err');
+  } else if (action === 'drop') {
+    showMsg('backpack-msg', res.ok ? withValidationWarning(`丢弃请求已入队 x${res.actual_quantity || quantity}`, res) : res.error, res.ok ? 'ok' : 'err');
+  } else {
+    showMsg('backpack-msg', res.ok ? withValidationWarning('分解请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
+  }
+}
+
+async function useSelected() {
+  return runBackpackActionOnSelection('use', '/api/item/use', '使用');
 }
 
 async function dropSelected() {
-  const quantity = getBackpackActionQuantity('丢弃');
-  if (quantity == null) return;
-  const res = await api('POST', '/api/item/drop', { item_id: selectedItemId, quantity });
-  showMsg('backpack-msg', res.ok ? withValidationWarning(`丢弃请求已入队 x${res.actual_quantity || quantity}`, res) : res.error, res.ok ? 'ok' : 'err');
+  return runBackpackActionOnSelection('drop', '/api/item/drop', '丢弃');
 }
 
 async function decomposeSelected() {
-  if (!selectedItemId) { showMsg('backpack-msg', '请先选择物品', 'err'); return; }
-  const res = await api('POST', '/api/item/decompose', { item_id: selectedItemId });
-  showMsg('backpack-msg', res.ok ? withValidationWarning('分解请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
+  return runBackpackActionOnSelection('decompose', '/api/item/decompose', '分解');
 }
 
 async function synthesizeSelected() {
+  if (isBackpackMultiSelect()) {
+    showMsg('backpack-msg', '多选时不可合成，请只选择一件物品', 'err');
+    return;
+  }
   const quantity = getBackpackActionQuantity('合成');
   if (quantity == null) return;
   const res = await api('POST', '/api/item/synthesize', { item_id: selectedItemId, quantity });
@@ -906,10 +1017,8 @@ function clearSynthesisBatchLog() {
   clearBackpackFlowLog();
 }
 
-function setBackpackSynthesisBatchUiLocked(locked) {
-  document.querySelectorAll('#backpack-actions [data-synth-disable="1"]').forEach((el) => {
-    el.disabled = !!locked;
-  });
+function setBackpackSynthesisBatchUiLocked(_locked) {
+  syncBackpackSelectionUi();
 }
 
 function updateSynthesisBatchButton() {
@@ -2429,6 +2538,7 @@ function toggleCollapseMode() {
   if (liaoguoSel) liaoguoSel.addEventListener('change', onLiaoguoPairSelectChange);
   await refreshStarStoneStatus(true);
   await refreshSynthesisBatchStatus(true);
+  syncBackpackSelectionUi();
   await refreshLiaoguoStatus(true);
   await refreshTransportSupplyStatus(true);
   await loadToolTeleportOptions();

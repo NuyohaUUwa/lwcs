@@ -145,6 +145,7 @@
   }
   .item-card:hover { border-color: var(--accent); }
   .item-card.selected { border-color: var(--accent); background: #1a2048; }
+  .item-card.multi-selected { box-shadow: inset 0 0 0 1px var(--accent2); }
   .item-card.can-decompose { border-left: 3px solid var(--yellow); }
   .item-name { font-size: 12px; font-weight: 500; word-break: break-all; }
   .item-qty { color: var(--text2); font-size: 11px; margin-top: 3px; }
@@ -449,19 +450,21 @@
     <!-- 背包 Tab -->
     <div class="tab-content panel-body" id="tab-backpack">
       <div id="backpack-actions">
-        <label class="text-muted text-sm" for="backpack-action-qty" style="display:flex; align-items:center; gap:6px;">
+        <span id="backpack-action-qty-wrap" class="text-muted text-sm" style="display:flex; align-items:center; gap:6px;">
           次数
           <input type="text" id="backpack-action-qty" inputmode="numeric" autocomplete="off" value="1" placeholder="1">
-        </label>
-        <button type="button" class="btn btn-success btn-sm" data-synth-disable="1" onclick="useSelected()">使用</button>
-        <button type="button" class="btn btn-danger btn-sm" data-synth-disable="1" onclick="dropSelected()">丢弃</button>
-        <button type="button" class="btn btn-warn btn-sm" data-synth-disable="1" onclick="decomposeSelected()">分解</button>
-        <button type="button" class="btn btn-primary btn-sm" data-synth-disable="1" onclick="synthesizeSelected()">合成</button>
-        <button type="button" id="btn-synthesis-batch" class="btn btn-primary btn-sm" onclick="toggleSynthesisBatch()">一键合成</button>
-        <button type="button" class="btn btn-ghost btn-sm" data-synth-disable="1" onclick="exchangeWuling()">兑换五灵</button>
-        <button type="button" id="btn-star-stone-loop" class="btn btn-primary btn-sm" data-synth-disable="1" onclick="toggleStarStoneLoop()">获取升星石</button>
+        </span>
+        <button type="button" class="btn btn-success btn-sm" data-backpack-basic-action="1" onclick="useSelected()">使用</button>
+        <button type="button" class="btn btn-danger btn-sm" data-backpack-basic-action="1" onclick="dropSelected()">丢弃</button>
+        <button type="button" class="btn btn-warn btn-sm" data-backpack-basic-action="1" onclick="decomposeSelected()">分解</button>
+        <button type="button" class="btn btn-primary btn-sm" data-backpack-single-only="1" onclick="synthesizeSelected()">合成</button>
+        <button type="button" id="btn-synthesis-batch" class="btn btn-primary btn-sm" data-backpack-single-only="1" onclick="toggleSynthesisBatch()">一键合成</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-backpack-single-only="1" onclick="decomposeAll()">一键分解</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-backpack-single-only="1" onclick="exchangeWuling()">兑换五灵</button>
+        <button type="button" id="btn-star-stone-loop" class="btn btn-primary btn-sm" data-backpack-single-only="1" onclick="toggleStarStoneLoop()">获取升星石</button>
         <button type="button" class="btn btn-ghost btn-sm" onclick="refreshBackpack()">刷新</button>
         <span class="text-muted text-sm" id="backpack-count"></span>
+        <span class="text-muted text-sm">点击选择，再点取消</span>
       </div>
       <div id="backpack-grid"><div class="text-muted text-sm">背包为空或尚未进入游戏</div></div>
         <details class="battle-dropdown mt-8">
