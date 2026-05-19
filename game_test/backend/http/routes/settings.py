@@ -14,6 +14,11 @@ from ...application.settings_service import (
     save_liaoguo_pair,
     save_quick_login,
 )
+from ...application.scheduled_task_service import (
+    get_scheduled_tasks_config,
+    get_scheduled_tasks_status,
+    update_scheduled_tasks_config,
+)
 from ..serializers import _json_ok
 from ..validators import get_json_body
 
@@ -69,3 +74,18 @@ def api_liaoguo_pairs_save():
 @blueprint.route("/liaoguo-pairs/<item_id>", methods=["DELETE"])
 def api_liaoguo_pairs_delete(item_id: str):
     return jsonify(remove_liaoguo_pair(item_id))
+
+
+@blueprint.route("/scheduled-tasks/config", methods=["GET"])
+def api_scheduled_tasks_config_get():
+    return jsonify(get_scheduled_tasks_config())
+
+
+@blueprint.route("/scheduled-tasks/config", methods=["PUT"])
+def api_scheduled_tasks_config_put():
+    return _json_ok(update_scheduled_tasks_config(get_json_body()))
+
+
+@blueprint.route("/scheduled-tasks/status", methods=["GET"])
+def api_scheduled_tasks_status_get():
+    return jsonify(get_scheduled_tasks_status())

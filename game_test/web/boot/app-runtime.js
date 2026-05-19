@@ -24,6 +24,7 @@ let worldBossRunning = false;
 let liaoguoRunning = false;
 let liaoguoPairs = [];
 let selectedLiaoguoPairKey = '';
+let scheduledTasksConfig = null;
 let battleMonsters = [];
 let selectedMonsterCode = '';
 let battleLogMode = 'simple'; // simple | detail
@@ -35,7 +36,6 @@ let battleState = { state: 'idle', in_progress: false, loop_running: false, curr
 let lastStatusData = { connected: false, connection_status: 'disconnected', role: null, server_name: '' };
 let teleportDestinationsCache = [];
 const TELEPORT_PACKET_TEMPLATE = '18000000e80303004428{random_num}f5054728000006000000{destination}0000';
-const DAILY_CHECKIN_TEMPLATE = '20000000e80313007d2e08f4f505882e00000e0000000c00636865636b496e446f3f7b7d';
 /** 当前地图 NPC：由后端 Python 解析后随 SSE packet.map_npc 下发 */
 let currentMapNpcFromPacket = { idHex: '', utf8Text: '' };
 let currentMapNpcListFromPacket = [];
@@ -1439,6 +1439,11 @@ function onControlLog(data) {
     appendSynthesisBatchLog(data.message, kind);
     return;
   }
+  if (data.scope === 'tools' || data.scope === 'scheduled_tasks') {
+    const kind = data.level === 'err' ? 'err' : data.level === 'ok' ? 'ok' : 'info';
+    appendFeatureLog(data.message, kind);
+    return;
+  }
   const kind = data.level === 'warn' ? 'end' : 'response';
   appendBattleLog({ raw_text: data.message }, kind);
 }
@@ -2036,8 +2041,8 @@ function toLittleEndianHex16(value) {
   return hex.slice(2, 4) + hex.slice(0, 2);
 }
 
-function appendTransportSupplyLog(text, kind = 'info') {
-  const box = document.getElementById('tool-transport-supply-log');
+function appendFeatureLog(text, kind = 'info') {
+  const box = document.getElementById('tool-feature-log');
   if (!box) return;
   if (box.querySelector('.text-muted.text-sm') && box.children.length === 1) {
     box.innerHTML = '';
@@ -2047,50 +2052,36 @@ function appendTransportSupplyLog(text, kind = 'info') {
   line.textContent = text;
   box.appendChild(line);
   box.scrollTop = box.scrollHeight;
+}
+
+function clearFeatureLog() {
+  const box = document.getElementById('tool-feature-log');
+  if (!box) return;
+  box.innerHTML = '';
+}
+
+function appendTransportSupplyLog(text, kind = 'info') {
+  appendFeatureLog(text, kind);
 }
 
 function clearTransportSupplyLog() {
-  const box = document.getElementById('tool-transport-supply-log');
-  if (!box) return;
-  box.innerHTML = '';
+  clearFeatureLog();
 }
 
 function appendWorldBossLog(text, kind = 'info') {
-  const box = document.getElementById('tool-world-boss-log');
-  if (!box) return;
-  if (box.querySelector('.text-muted.text-sm') && box.children.length === 1) {
-    box.innerHTML = '';
-  }
-  const line = document.createElement('div');
-  line.className = kind === 'err' ? 'text-red' : kind === 'ok' ? 'text-green' : 'text-muted';
-  line.textContent = text;
-  box.appendChild(line);
-  box.scrollTop = box.scrollHeight;
+  appendFeatureLog(text, kind);
 }
 
 function clearWorldBossLog() {
-  const box = document.getElementById('tool-world-boss-log');
-  if (!box) return;
-  box.innerHTML = '';
+  clearFeatureLog();
 }
 
 function appendLiaoguoLog(text, kind = 'info') {
-  const box = document.getElementById('tool-liaoguo-log');
-  if (!box) return;
-  if (box.querySelector('.text-muted.text-sm') && box.children.length === 1) {
-    box.innerHTML = '';
-  }
-  const line = document.createElement('div');
-  line.className = kind === 'err' ? 'text-red' : kind === 'ok' ? 'text-green' : 'text-muted';
-  line.textContent = text;
-  box.appendChild(line);
-  box.scrollTop = box.scrollHeight;
+  appendFeatureLog(text, kind);
 }
 
 function clearLiaoguoLog() {
-  const box = document.getElementById('tool-liaoguo-log');
-  if (!box) return;
-  box.innerHTML = '';
+  clearFeatureLog();
 }
 
 function updateTransportSupplyButton() {
@@ -2172,6 +2163,7 @@ function renderLiaoguoPairs() {
     if (taskEl) taskEl.value = '';
     if (ticketEl) ticketEl.value = '';
     if (abandonEl) abandonEl.value = '';
+    renderScheduledLiaoguoPairs();
     return;
   }
   select.innerHTML = liaoguoPairs
@@ -2182,6 +2174,106 @@ function renderLiaoguoPairs() {
     .join('');
   select.value = selectedLiaoguoPairKey;
   applySelectedLiaoguoPairToInputs();
+  renderScheduledLiaoguoPairs();
+}
+
+function parseScheduleTimesInput(value) {
+  return String(value || '')
+    .split(/[,\uff0c\s]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function setInputValue(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.value = value;
+}
+
+function setCheckboxValue(id, checked) {
+  const el = document.getElementById(id);
+  if (el) el.checked = !!checked;
+}
+
+function getCheckboxValue(id) {
+  return !!document.getElementById(id)?.checked;
+}
+
+function renderScheduledLiaoguoPairs() {
+  const box = document.getElementById('sched-liaoguo-pairs');
+  if (!box) return;
+  const selected = new Set(scheduledTasksConfig?.liaoguo?.pair_ids || []);
+  if (!liaoguoPairs.length) {
+    box.innerHTML = '<span class="text-muted text-sm">暂无辽国映射</span>';
+    return;
+  }
+  box.innerHTML = liaoguoPairs.map((pair) => {
+    const key = getLiaoguoPairKey(pair);
+    const checked = selected.has(key) ? ' checked' : '';
+    return `<label style="display:inline-flex; align-items:center; gap:4px; margin-right:10px; margin-bottom:6px;">
+      <input type="checkbox" class="sched-liaoguo-pair" value="${escAttr(key)}"${checked}>
+      <span>${escHtml(pair.label || key)} (${escHtml(pair.monsterCode || '')})</span>
+    </label>`;
+  }).join('');
+}
+
+function renderScheduledTasksConfig(config) {
+  scheduledTasksConfig = config || {};
+  const daily = scheduledTasksConfig.daily_checkin || {};
+  const transport = scheduledTasksConfig.transport_supply || {};
+  const worldBoss = scheduledTasksConfig.world_boss || {};
+  const liaoguo = scheduledTasksConfig.liaoguo || {};
+  setCheckboxValue('sched-daily-enabled', daily.enabled);
+  setInputValue('sched-daily-times', Array.isArray(daily.times) ? daily.times.join(',') : '');
+  setCheckboxValue('sched-daily-login', daily.run_on_login);
+  setCheckboxValue('sched-transport-enabled', transport.enabled);
+  setInputValue('sched-transport-times', Array.isArray(transport.times) ? transport.times.join(',') : '');
+  setCheckboxValue('sched-world-boss-enabled', worldBoss.enabled);
+  setInputValue('sched-world-boss-times', Array.isArray(worldBoss.times) ? worldBoss.times.join(',') : '');
+  setCheckboxValue('sched-liaoguo-enabled', liaoguo.enabled);
+  setInputValue('sched-liaoguo-time', liaoguo.time || '');
+  renderScheduledLiaoguoPairs();
+}
+
+async function loadScheduledTasksConfig() {
+  const res = await api('GET', '/api/scheduled-tasks/config').catch(() => null);
+  if (!res?.ok) {
+    setToolResult(res?.error || '读取定时配置失败', 'err');
+    return;
+  }
+  renderScheduledTasksConfig(res.config || {});
+}
+
+async function saveScheduledTasksConfig() {
+  const pairIds = Array.from(document.querySelectorAll('.sched-liaoguo-pair:checked'))
+    .map((el) => String(el.value || '').trim())
+    .filter(Boolean);
+  const body = {
+    daily_checkin: {
+      enabled: getCheckboxValue('sched-daily-enabled'),
+      times: parseScheduleTimesInput(document.getElementById('sched-daily-times')?.value || ''),
+      run_on_login: getCheckboxValue('sched-daily-login'),
+    },
+    transport_supply: {
+      enabled: getCheckboxValue('sched-transport-enabled'),
+      times: parseScheduleTimesInput(document.getElementById('sched-transport-times')?.value || ''),
+    },
+    world_boss: {
+      enabled: getCheckboxValue('sched-world-boss-enabled'),
+      times: parseScheduleTimesInput(document.getElementById('sched-world-boss-times')?.value || ''),
+    },
+    liaoguo: {
+      enabled: getCheckboxValue('sched-liaoguo-enabled'),
+      time: String(document.getElementById('sched-liaoguo-time')?.value || '').trim(),
+      pair_ids: pairIds,
+    },
+  };
+  const res = await api('PUT', '/api/scheduled-tasks/config', body).catch(() => null);
+  if (!res?.ok) {
+    setToolResult(res?.error || '保存定时配置失败', 'err');
+    return;
+  }
+  renderScheduledTasksConfig(res.config || body);
+  setToolResult('定时配置已保存', 'ok');
 }
 
 function applySelectedLiaoguoPairToInputs() {
@@ -2269,8 +2361,6 @@ async function refreshLiaoguoStatus(silent = true) {
 }
 
 async function runLiaoguoFlow(pair) {
-  const isStarting = !liaoguoRunning;
-  if (isStarting) clearLiaoguoLog();
   const endpoint = liaoguoRunning ? '/api/flow/liaoguo/stop' : '/api/flow/liaoguo/start';
   const actionText = liaoguoRunning ? '停止' : '启动';
   const body = liaoguoRunning ? {} : { ...(pair || {}) };
@@ -2307,8 +2397,6 @@ async function refreshWorldBossStatus(silent = true) {
 }
 
 async function toggleTransportSupplyFlow() {
-  const isStarting = !transportSupplyRunning;
-  if (isStarting) clearTransportSupplyLog();
   const endpoint = transportSupplyRunning
     ? '/api/flow/transport-supply/stop'
     : '/api/flow/transport-supply/start';
@@ -2324,8 +2412,6 @@ async function toggleTransportSupplyFlow() {
 }
 
 async function toggleWorldBossFlow() {
-  const isStarting = !worldBossRunning;
-  if (isStarting) clearWorldBossLog();
   const endpoint = worldBossRunning
     ? '/api/flow/world-boss/stop'
     : '/api/flow/world-boss/start';
@@ -2398,8 +2484,12 @@ async function sendTeleportPacket() {
 }
 
 async function sendDailyCheckinPacket() {
-  const packetHex = DAILY_CHECKIN_TEMPLATE.replace('08f4', randomNumHex4());
-  await sendToolPacket(packetHex);
+  const res = await api('POST', '/api/flow/daily-checkin/run', {}).catch(() => null);
+  if (!res?.ok) {
+    setToolResult(`每日签到发送失败：${res?.error || '未知错误'}`, 'err');
+    return;
+  }
+  setToolResult('每日签到：已发送', 'ok');
 }
 
 async function sendRoleStatPacket() {
@@ -2612,6 +2702,7 @@ function toggleCollapseMode() {
   loadQuickLogins();
   loadBuyItems();
   await loadLiaoguoPairs();
+  await loadScheduledTasksConfig();
   const liaoguoSel = document.getElementById('liaoguo-pair-select');
   if (liaoguoSel) liaoguoSel.addEventListener('change', onLiaoguoPairSelectChange);
   await refreshStarStoneStatus(true);

@@ -70,7 +70,11 @@ def send_daily_checkin(*, source: str = "manual") -> dict[str, Any]:
     session = get_session()
     if not session.connected or not session.sock:
         return {"ok": False, "error": "未连接游戏服"}
-    res = send_raw_action(_DAILY_CHECKIN_PACKET_HEX, priority=10, use_queue=True)
+    import random
+
+    rand = random.randint(0, 0xFFFF).to_bytes(2, "little").hex()
+    packet_hex = _DAILY_CHECKIN_PACKET_HEX.replace("08f4", rand, 1)
+    res = send_raw_action(packet_hex, priority=10, use_queue=True)
     if not res.get("ok"):
         _emit_tool_log(f"每日签到发送失败：{res.get('error', '未知错误')}", level="err")
         return res
@@ -751,7 +755,7 @@ _liaoguo_thread: threading.Thread | None = None
 
 def get_liaoguo_status() -> dict[str, Any]:
     with _liaoguo_state.lock:
-        return {"ok": True, "running": _liaoguo_state.running}
+        return {"ok": True, "running": _liaoguo_state.running, "stop_requested": _liaoguo_state.stop_event.is_set()}
 
 
 def _build_abandon_task_packet(abandon_code: str) -> str:

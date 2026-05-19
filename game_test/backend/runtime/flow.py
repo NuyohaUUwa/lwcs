@@ -315,6 +315,10 @@ def _control_worker_tick(now: float) -> None:
     battle_state = get_battle_state_snapshot()
     control_state = session.get_control_state()
 
+    from game_test.backend.application.scheduled_task_service import tick_scheduled_tasks
+
+    tick_scheduled_tasks(now)
+
     if control_state.get("reconnect_state") in ("scheduled", "banned_wait"):
         next_retry_ts = float(control_state.get("reconnect_next_retry_ts") or 0.0)
         if not _should_keep_reconnecting(session):
@@ -719,6 +723,9 @@ def select_role_flow(role_id: str) -> dict[str, Any]:
         )
         session.heartbeat_thread = heartbeat_thread
         session.notify_control_state()
+        from game_test.backend.application.scheduled_task_service import maybe_run_login_checkin
+
+        maybe_run_login_checkin()
         return {"ok": True, "role": matched_role.to_dict() if matched_role else {"role_id": role_id}}
     except Exception as e:
         _default_disconnect_handler(e)
