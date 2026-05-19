@@ -15,12 +15,15 @@ elif __name__ == "game_test.backend.runtime.flow":
 from game_test.backend.domain.auth.login import build_login_packet, parse_login_response
 from game_test.backend.domain.combat.battle import (
     BATTLE_STATE_ENDED,
+    BATTLE_STATE_WAITING_START_RESPONSE,
+    MAX_F603_START_TIMEOUT_RECOVER,
     MAX_F703_TIMEOUT_RECOVER,
     clear_battle_wait_deadline,
     get_battle_state_snapshot,
     get_wait_timeout_reason,
     handle_battle_server_packet,
     is_battle_wait_timed_out,
+    recover_battle_wait_timeout_resend_f603,
     recover_battle_wait_timeout_with_f703,
     reset_battle_state,
     schedule_loop_restart_after_reconnect,
@@ -321,21 +324,40 @@ def _control_worker_tick(now: float) -> None:
 
     if session.connected and is_battle_wait_timed_out(now):
         reason = get_wait_timeout_reason()
+        battle_state = get_battle_state_snapshot()
+        st = str(battle_state.get("state") or "")
         clear_battle_wait_deadline()
-        res = recover_battle_wait_timeout_with_f703()
-        if res.get("ok"):
-            n = res.get("recover_count", 0)
-            _emit_control_log(
-                f"{reason}，已发送 f703 超时恢复（第 {n}/{MAX_F703_TIMEOUT_RECOVER} 次）",
-                level="warn",
-                scope="battle",
-            )
+        if st == BATTLE_STATE_WAITING_START_RESPONSE:
+            res = recover_battle_wait_timeout_resend_f603()
+            if res.get("ok"):
+                n = res.get("recover_count", 0)
+                _emit_control_log(
+                    f"{reason}，已重发 f603（第 {n}/{MAX_F603_START_TIMEOUT_RECOVER} 次）",
+                    level="warn",
+                    scope="battle",
+                )
+            else:
+                _emit_control_log(
+                    f"{reason}，f603 超时重发未继续：{res.get('error', '')}",
+                    level="warn",
+                    scope="battle",
+                )
         else:
-            _emit_control_log(
-                f"{reason}，超时恢复未继续：{res.get('error', '')}",
-                level="warn",
-                scope="battle",
-            )
+            res = recover_battle_wait_timeout_with_f703()
+            if res.get("ok"):
+                n = res.get("recover_count", 0)
+                _emit_control_log(
+                    f"{reason}，已发送 f703 超时恢复（第 {n}/{MAX_F703_TIMEOUT_RECOVER} 次）",
+                    level="warn",
+                    scope="battle",
+                )
+            else:
+                _emit_control_log(
+                    f"{reason}，超时恢复未继续：{res.get('error', '')}",
+                    level="warn",
+                    scope="battle",
+                )
+        battle_state = get_battle_state_snapshot()
 
     next_start_ts = float(battle_state.get("next_start_ts") or 0.0)
     if (
