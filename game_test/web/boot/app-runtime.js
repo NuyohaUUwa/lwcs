@@ -6,7 +6,7 @@ const appApi = (method, path, body) => window.GameControllers.performJsonRequest
 let selectedServer = null;  // {name, ip, port}
 let selectedRoleId = null;
 let selectedItemId = null;
-/** 背包多选（点击选中/再点取消）；仅 1 件选中时与 selectedItemId 同步 */
+/** 背包多选（Ctrl/⌘+点击切换）；仅 1 件选中时与 selectedItemId 同步 */
 let selectedItemIds = new Set();
 let backpackItemsCache = [];
 let eventSource = null;
@@ -710,7 +710,7 @@ function renderBackpack(items) {
     d.innerHTML = `<div class="item-name">${escHtml(item.name)}</div>
       <div class="item-qty">数量：${item.quantity}</div>
       <div class="item-id mono">${item.item_id}</div>`;
-    d.onclick = () => onBackpackItemClick(item.item_id);
+    d.onclick = (e) => onBackpackItemClick(item.item_id, e);
     grid.appendChild(d);
   });
 }
@@ -723,9 +723,14 @@ function syncSelectedItemIdFromSet() {
   }
 }
 
-function onBackpackItemClick(itemId) {
-  if (selectedItemIds.has(itemId)) selectedItemIds.delete(itemId);
-  else selectedItemIds.add(itemId);
+function onBackpackItemClick(itemId, e) {
+  if (e.ctrlKey || e.metaKey) {
+    if (selectedItemIds.has(itemId)) selectedItemIds.delete(itemId);
+    else selectedItemIds.add(itemId);
+  } else {
+    selectedItemIds.clear();
+    selectedItemIds.add(itemId);
+  }
   syncSelectedItemIdFromSet();
   updateBackpackCardSelection();
   syncBackpackActionQtyInput();
