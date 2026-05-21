@@ -204,13 +204,11 @@ def _run_daily_checkin(scheduled_time: str) -> None:
     if not _set_active(feature, label, scheduled_time):
         _emit_schedule_log("每日签到定时已在执行，忽略本次触发", level="info")
         return
-    loop_snapshot = _capture_and_stop_loop(label)
     try:
         res = send_daily_checkin(source="scheduled")
         if not res.get("ok"):
             _emit_schedule_log(f"每日签到定时发送失败：{res.get('error', '未知错误')}", level="err")
     finally:
-        _restore_loop(loop_snapshot, label)
         _clear_active(feature)
 
 
