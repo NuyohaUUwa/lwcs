@@ -31,6 +31,7 @@ from game_test.backend.domain.combat.battle import (
 )
 from game_test.backend.domain.communication.heartbeat import start_heartbeat
 from game_test.backend.domain.inventory.backpack import dispatch_backpack_packet
+from game_test.backend.domain.inventory.gold import GOLD_STATUS_FINGERPRINT, handle_gold_status_packet
 from game_test.backend.domain.inventory.item_use import try_parse_synthesis_response_packet
 from game_test.backend.domain.packet.probe import record_packet
 from game_test.backend.domain.roles.role_stats import merge_role_stats_from_packet, update_session_stats
@@ -210,12 +211,16 @@ def _clear_login_state_after_reconnect_failure() -> None:
         session.backpack_items = {}
         session.role_stats = {}
         session.role_stats_full_refresh_on_next_ed07 = False
+        session.gold_reserve_copper = 0
+        session.gold_safe_copper = 0
+        session.gold_backpack_copper = 0
         session.current_map_npc_id_hex = DEFAULT_MAP_NPC_ID_HEX
         session.current_map_npc_utf8_text = DEFAULT_MAP_NPC_UTF8_TEXT
         session.last_recv_ts = 0.0
         session.recv_framing_buffer = b""
     session.notify_status_change()
     session.notify_backpack_update()
+    session.notify_gold_update()
     session.notify_battle_state()
 
 
@@ -445,6 +450,9 @@ def _default_disconnect_handler(error: Exception):
     with session._lock:
         session.role_stats = {}
         session.role_stats_full_refresh_on_next_ed07 = False
+        session.gold_reserve_copper = 0
+        session.gold_safe_copper = 0
+        session.gold_backpack_copper = 0
     session.connected = False
     session.connection_status = "disconnected"
     session.stop_runtime()
@@ -453,6 +461,7 @@ def _default_disconnect_handler(error: Exception):
     session.notify_status_change()
     if session.auto_reconnect_enabled and _schedule_reconnect(str(error), immediate=True):
         _emit_control_log(f"连接断开：{error}；后端将自动恢复", level="warn", scope="reconnect")
+    session.notify_gold_update()
 
 
 def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
@@ -470,6 +479,9 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
         from game_test.backend.application.flow_service import handle_world_boss_packet
 
         handle_world_boss_packet(hex_str)
+    if fingerprint == GOLD_STATUS_FINGERPRINT:
+        handle_gold_status_packet(hex_str)
+        return
     if _is_banned_role_packet(hex_str):
         _handle_banned_role_packet()
         return
@@ -723,8 +735,10 @@ def select_role_flow(role_id: str) -> dict[str, Any]:
         )
         session.heartbeat_thread = heartbeat_thread
         session.notify_control_state()
+        from game_test.backend.application.gold_service import schedule_gold_refresh
         from game_test.backend.application.scheduled_task_service import maybe_run_login_checkin
 
+        schedule_gold_refresh()
         maybe_run_login_checkin()
         return {"ok": True, "role": matched_role.to_dict() if matched_role else {"role_id": role_id}}
     except Exception as e:

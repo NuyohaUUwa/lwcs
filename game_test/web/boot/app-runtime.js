@@ -9,6 +9,7 @@ let selectedItemId = null;
 /** 背包多选（Ctrl/⌘+点击切换）；仅 1 件选中时与 selectedItemId 同步 */
 let selectedItemIds = new Set();
 let backpackItemsCache = [];
+let goldState = { reserve_copper: 0, safe_copper: 0, backpack_copper: 0 };
 let eventSource = null;
 let isConnected = false;
 let prevConnected = false;
@@ -87,6 +88,9 @@ function startSSE() {
       else if (msg.type === 'control_state') setControlState(msg.data);
       else if (msg.type === 'backpack') {
         renderBackpack(msg.data);
+      }
+      else if (msg.type === 'gold') {
+        renderGold(msg.data);
       }
       else if (msg.type === 'synthesis_result') {
         onSynthesisResult(msg.data);
@@ -267,6 +271,7 @@ function updateStatus(data) {
 
   if (!data.connected) {
     backpackItemsCache = [];
+    renderGold({});
     selectedItemId = null;
     selectedItemIds.clear();
     const sc = document.getElementById('stats-content');
@@ -658,11 +663,52 @@ function resetToLoginState() {
   document.getElementById('role-stats-panel').classList.remove('visible');
   document.getElementById('stats-content').innerHTML = '<span class="text-muted">等待数据...</span>';
   renderBackpack([]);
+  renderGold({});
 }
 
 // ================================================================== //
 //  背包                                                                //
 // ================================================================== //
+function renderGold(data) {
+  goldState = {
+    reserve_copper: Number(data?.reserve_copper || 0),
+    safe_copper: Number(data?.safe_copper || 0),
+    backpack_copper: Number(data?.backpack_copper || 0),
+  };
+  const reserveEl = document.getElementById('gold-reserve');
+  const safeEl = document.getElementById('gold-safe');
+  const backpackEl = document.getElementById('gold-backpack');
+  if (reserveEl) reserveEl.textContent = data?.reserve_text || formatGoldFromCopper(goldState.reserve_copper);
+  if (safeEl) safeEl.textContent = data?.safe_text || formatGoldFromCopper(goldState.safe_copper);
+  if (backpackEl) backpackEl.textContent = data?.backpack_text || formatGoldFromCopper(goldState.backpack_copper);
+}
+
+async function loadGold() {
+  const res = await api('GET', '/api/gold').catch(() => null);
+  if (res?.ok) renderGold(res.gold || {});
+}
+
+async function refreshGold(options = {}) {
+  const silent = options?.silent === true;
+  const res = await api('POST', '/api/gold/refresh').catch((e) => ({ ok: false, error: String(e) }));
+  if (res.ok) {
+    if (res.gold) renderGold(res.gold);
+    if (!silent) showMsg('backpack-msg', '金币刷新请求已入队', 'ok');
+  } else {
+    if (!silent) showMsg('backpack-msg', res.error || '金币刷新失败', 'err');
+  }
+}
+
+async function depositGold() {
+  const res = await api('POST', '/api/gold/deposit').catch((e) => ({ ok: false, error: String(e) }));
+  showMsg('backpack-msg', res.ok ? '金币存储请求已入队，后端将自动刷新' : (res.error || '金币存储失败'), res.ok ? 'ok' : 'err');
+}
+
+async function withdrawGold() {
+  const res = await api('POST', '/api/gold/withdraw').catch((e) => ({ ok: false, error: String(e) }));
+  showMsg('backpack-msg', res.ok ? '金币提取请求已入队，后端将自动刷新' : (res.error || '金币提取失败'), res.ok ? 'ok' : 'err');
+}
+
 async function refreshBackpack() {
   // 对齐 main-000.py _refresh_backpack_manual：清空显示 → 拉取最新缓存 → 展示数量
   const grid = document.getElementById('backpack-grid');
@@ -674,6 +720,7 @@ async function refreshBackpack() {
   const res = await api('POST', '/api/backpack/refresh');
   if (res.ok) {
     renderBackpack(res.items || []);
+    if (res.gold) renderGold(res.gold);
     showMsg('backpack-msg', `手动刷新完成，背包当前物品数量：${res.count} 件`, 'ok');
   } else {
     showMsg('backpack-msg', res.error || '刷新失败', 'err');
@@ -2711,6 +2758,7 @@ function toggleCollapseMode() {
   loadAutoUseRules();
   loadQuickLogins();
   loadBuyItems();
+  loadGold();
   await loadLiaoguoPairs();
   await loadScheduledTasksConfig();
   const liaoguoSel = document.getElementById('liaoguo-pair-select');

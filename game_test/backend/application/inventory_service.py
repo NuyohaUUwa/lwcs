@@ -8,14 +8,14 @@ from game_test.backend.runtime.actions import send_action
 
 
 def get_backpack() -> dict[str, Any]:
-    return {"ok": True, "items": get_backpack_snapshot()}
+    return {"ok": True, "items": get_backpack_snapshot(), "gold": get_session().get_gold_snapshot()}
 
 
 def refresh_backpack() -> dict[str, Any]:
     session = get_session()
     items = get_backpack_snapshot()
     session.notify_backpack_update()
-    return {"ok": True, "items": items, "count": len(items)}
+    return {"ok": True, "items": items, "count": len(items), "gold": session.get_gold_snapshot()}
 
 
 def use_item(payload: dict[str, Any]) -> dict[str, Any]:

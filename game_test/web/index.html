@@ -151,6 +151,18 @@
   .item-qty { color: var(--text2); font-size: 11px; margin-top: 3px; }
   .item-id { color: #444; font-size: 10px; font-family: monospace; margin-top: 2px; }
   #backpack-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  #role-gold-panel {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-top: 10px; padding: 8px; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--bg);
+  }
+  .gold-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface2); font-size: 12px;
+  }
+  .gold-pill span:first-child { color: var(--text2); }
+  .gold-pill strong { color: var(--yellow); font-weight: 600; }
   #backpack-action-qty { width: 88px; }
   #backpack-buy-code { font-family: monospace; font-size: 12px; min-width: 280px; flex: 1 1 320px; }
   #backpack-buy-name { min-width: 160px; flex: 0 1 180px; }
@@ -432,6 +444,14 @@
       </div>
       <div class="panel-body" id="stats-body">
         <div id="stats-content" style="font-size:12px; color:var(--text2);">等待数据...</div>
+        <div id="role-gold-panel">
+          <div class="gold-pill"><span>储备</span><strong id="gold-reserve">0金0银0铜</strong></div>
+          <div class="gold-pill"><span>保险箱</span><strong id="gold-safe">0金0银0铜</strong></div>
+          <div class="gold-pill"><span>背包金币</span><strong id="gold-backpack">0金0银0铜</strong></div>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="refreshGold()">刷新金币</button>
+          <button type="button" class="btn btn-success btn-sm" onclick="depositGold()">存储</button>
+          <button type="button" class="btn btn-warn btn-sm" onclick="withdrawGold()">提取</button>
+        </div>
       </div>
     </div>
 

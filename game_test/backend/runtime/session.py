@@ -55,6 +55,9 @@ class GameSession:
         self.backpack_items: Dict[str, Item] = {}
         self.role_stats: Dict[str, str] = {}
         self.role_stats_full_refresh_on_next_ed07: bool = False
+        self.gold_reserve_copper: int = 0
+        self.gold_safe_copper: int = 0
+        self.gold_backpack_copper: int = 0
         # 固定使用 config 默认 NPC；不再从包解析/外部接口动态切换。
         self.current_map_npc_id_hex: str = DEFAULT_MAP_NPC_ID_HEX
         self.current_map_npc_utf8_text: str = DEFAULT_MAP_NPC_UTF8_TEXT
@@ -194,6 +197,32 @@ class GameSession:
         with self._lock:
             return [item.to_dict() for item in self.backpack_items.values()]
 
+    def update_gold(self, values: dict[str, int]) -> None:
+        with self._lock:
+            if "reserve" in values:
+                self.gold_reserve_copper = int(values["reserve"] or 0)
+            if "safe" in values:
+                self.gold_safe_copper = int(values["safe"] or 0)
+            if "backpack" in values:
+                self.gold_backpack_copper = int(values["backpack"] or 0)
+
+    def clear_gold(self) -> None:
+        with self._lock:
+            self.gold_reserve_copper = 0
+            self.gold_safe_copper = 0
+            self.gold_backpack_copper = 0
+
+    def get_gold_snapshot(self) -> dict[str, Any]:
+        from game_test.backend.domain.inventory.gold import gold_snapshot_from_values
+
+        with self._lock:
+            values = {
+                "reserve": self.gold_reserve_copper,
+                "safe": self.gold_safe_copper,
+                "backpack": self.gold_backpack_copper,
+            }
+        return gold_snapshot_from_values(values)
+
     def append_packet(self, record: dict[str, Any]):
         with self._lock:
             self._packet_log.append(record)
@@ -261,6 +290,9 @@ class GameSession:
 
     def notify_backpack_update(self):
         self._notify_sse("backpack", self.get_backpack_list())
+
+    def notify_gold_update(self):
+        self._notify_sse("gold", self.get_gold_snapshot())
 
     def notify_synthesis_result(self, payload: dict[str, Any]) -> None:
         """合成结果（e80301004f51），供前端在背包区展示。"""
@@ -411,6 +443,9 @@ class GameSession:
             self.backpack_items = {}
             self.role_stats = {}
             self.role_stats_full_refresh_on_next_ed07 = False
+            self.gold_reserve_copper = 0
+            self.gold_safe_copper = 0
+            self.gold_backpack_copper = 0
             self.current_map_npc_id_hex = DEFAULT_MAP_NPC_ID_HEX
             self.current_map_npc_utf8_text = DEFAULT_MAP_NPC_UTF8_TEXT
             self.last_recv_ts = 0.0
@@ -447,6 +482,7 @@ class GameSession:
         self.notify_status_change()
         self.notify_battle_state()
         self.notify_control_state()
+        self.notify_gold_update()
 
 
 _session: Optional[GameSession] = None

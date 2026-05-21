@@ -27,6 +27,7 @@ def api_events():
                 f"data: {json.dumps({'type': 'battle_state', 'data': session.get_status().get('battle_state', {})}, ensure_ascii=False)}"
                 "\n\n"
             )
+            yield f"data: {json.dumps({'type': 'gold', 'data': session.get_gold_snapshot()}, ensure_ascii=False)}\n\n"
             while True:
                 try:
                     payload = q.get(timeout=20)
