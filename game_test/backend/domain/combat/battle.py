@@ -12,6 +12,7 @@
 
 import json
 import re
+import threading
 import time
 from typing import Any, Dict, List
 
@@ -35,6 +36,7 @@ BATTLE_STATE_WAITING_DE07 = "waiting_de07"
 BATTLE_STATE_WAITING_DF07 = "waiting_df07"
 BATTLE_STATE_COOLDOWN = "cooldown"
 BATTLE_STATE_ERROR = "error"
+SMALL_F703_FOLLOW_DELAY_S = 1.2
 
 DE07_TIMEOUT_S = 3.0
 F703_TIMEOUT_S = 3.0
@@ -842,16 +844,44 @@ def _send_f703(source: str) -> Dict[str, Any]:
         mark_battle_error(res.get("error", "发送 f703 失败"))
         return res
 
+    small_ack_res = {
+        "ok": True,
+        "scheduled": True,
+        "delay_s": SMALL_F703_FOLLOW_DELAY_S,
+        "sent": [],
+        "failed": [],
+    }
+    _schedule_small_f703_after_main(source)
+
     _set_battle_state(
         state=BATTLE_STATE_WAITING_DF07,
         in_progress=True,
         current_monster=current_monster,
         last_action="f703",
-        last_result={"source": source, "sent": "f703", "random_num": built["random_num"]},
+        last_result={
+            "source": source,
+            "sent": "f703",
+            "random_num": built["random_num"],
+            "small_ack": small_ack_res,
+        },
         wait_deadline_ts=time.time() + F703_TIMEOUT_S,
         next_start_ts=0.0,
     )
-    return {"ok": True, **built, "source": source}
+    return {"ok": True, **built, "source": source, "small_ack": small_ack_res}
+
+
+def _schedule_small_f703_after_main(source: str) -> None:
+    def _run() -> None:
+        try:
+            from game_test.backend.domain.ladder.small_runtime import small_account_manager
+
+            small_account_manager.send_battle_ack_after_main(source)
+        except Exception as exc:
+            print(f"[battle] 小号跟随 f703 发送失败: {exc}")
+
+    timer = threading.Timer(SMALL_F703_FOLLOW_DELAY_S, _run)
+    timer.daemon = True
+    timer.start()
 
 
 def recover_battle_wait_timeout_resend_f603() -> Dict[str, Any]:

@@ -334,6 +334,15 @@
   .battle-log { min-height: 220px; max-height: 820px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); padding: 8px; }
   .battle-log-item { font-size: 12px; margin-bottom: 6px; color: var(--text2); white-space: pre-wrap; word-break: break-word; }
   .battle-log-item.end { color: var(--yellow); }
+  .ladder-log { min-height: 120px; max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); padding: 8px; }
+  .ladder-log-item { font-size: 12px; margin-bottom: 6px; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+  .ladder-log-item.end { color: var(--yellow); }
+  .ladder-meta { color: var(--text2); font-size: 11px; }
+  .ladder-empty { color: var(--text2); font-size: 11px; }
+  .small-status-badge { display:inline-flex; align-items:center; min-width:72px; justify-content:center; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:700; border:1px solid var(--border); }
+  .small-status-badge.online { color:#07140e; background:var(--green); border-color:var(--green); }
+  .small-status-badge.logging_in, .small-status-badge.reconnecting { color:#1b1400; background:var(--yellow); border-color:var(--yellow); }
+  .small-status-badge.offline, .small-status-badge.stopped { color:#fff; background:var(--red); border-color:var(--red); }
   .monster-row { display: grid; grid-template-columns: 1fr 80px 130px; gap: 8px; align-items: center; margin-bottom: 6px; }
   .monster-row.selected { background: #1a2048; border-radius: 6px; padding: 4px; }
   .monster-code { font-family: monospace; color: var(--text2); }
@@ -464,6 +473,7 @@
       <button class="tab-btn" onclick="switchTab('backpack')">🎒 背包</button>
       <button class="tab-btn" onclick="switchTab('chat')">💬 聊天</button>
       <button class="tab-btn" onclick="switchTab('battle')">⚔ 战斗</button>
+      <button class="tab-btn" onclick="switchTab('ladder')">🪜 天梯</button>
       <button class="tab-btn" onclick="switchTab('tools')">🛠 功能</button>
     </div>
 
@@ -584,6 +594,57 @@
         </div>
         <div id="battle-log" class="battle-log"></div>
       </div>
+    </div>
+
+    <!-- 天梯 Tab -->
+    <div class="tab-content panel-body" id="tab-ladder" style="flex-direction:column; gap:10px;">
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">单梯挑战</div>
+        <div class="battle-row">
+          <span class="text-muted">楼层：</span>
+          <input type="text" id="ladder-floor" inputmode="numeric" autocomplete="off" value="1" placeholder="1~20" style="width:90px; padding:4px 8px; font-size:12px;">
+          <button class="btn btn-primary btn-sm" onclick="sendLadderChallenge()">发送挑战</button>
+          <span class="ladder-meta" id="ladder-challenge-meta">目标 ID 由后端计算</span>
+        </div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">组队邀请</div>
+        <div class="battle-row">
+          <input type="text" id="ladder-invite-user-ids" placeholder="小号角色ID，多个用逗号或空格分隔" style="min-width:260px; max-width:460px;">
+          <button class="btn btn-primary btn-sm" onclick="sendLadderInvite(false)">邀请输入ID</button>
+          <button class="btn btn-ghost btn-sm" onclick="sendLadderInvite(true)">邀请在线托管小号</button>
+        </div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">小号管理</div>
+        <div class="battle-row">
+          <input type="text" id="small-account-account" placeholder="小号账号" style="max-width:180px;">
+          <input type="password" id="small-account-password" placeholder="小号密码" style="max-width:180px;">
+          <button class="btn btn-primary btn-sm" onclick="saveSmallAccount()">保存小号</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearSmallAccountForm()">清空</button>
+          <button class="btn btn-ghost btn-sm" onclick="loadSmallAccounts()">刷新列表</button>
+        </div>
+        <div id="small-account-list" class="mt-8 ladder-empty">暂无小号</div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">小号控制</div>
+        <div class="battle-row">
+          <button class="btn btn-success btn-sm" onclick="startSmallAccounts()">启动前两个小号</button>
+          <button class="btn btn-danger btn-sm" onclick="stopSmallAccounts()">停止小号</button>
+          <button class="btn btn-ghost btn-sm" onclick="refreshSmallStatus(false)">刷新状态</button>
+        </div>
+        <div id="small-status-list" class="mt-8 ladder-empty">暂无托管小号</div>
+      </div>
+
+      <div class="battle-box">
+        <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">天梯战斗日志</div>
+        <div id="ladder-battle-log" class="ladder-log"><div class="ladder-empty">启动天梯后显示主号战斗流程</div></div>
+      </div>
+
+      <div id="ladder-result"></div>
     </div>
 
     <!-- 功能 Tab -->

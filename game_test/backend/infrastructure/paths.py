@@ -43,6 +43,7 @@ else:
 MONSTERS_FILE = os.path.join(SHARED_DATA_DIR, "monsters.json")
 FINGERPRINTS_FILE = os.path.join(SHARED_DATA_DIR, "fingerprints.json")
 TELEPORT_DESTINATIONS_FILE = os.path.join(SHARED_DATA_DIR, "teleport_destination.json")
+SMALL_ACCOUNTS_FILE = os.path.join(DATA_ROOT, "small_accounts.json")
 
 QUICK_LOGINS_FILE = os.path.join(INSTANCE_DATA_DIR, "quick_logins.json")
 BUY_ITEMS_FILE = os.path.join(INSTANCE_DATA_DIR, "buy_items.json")
@@ -72,6 +73,7 @@ __all__ = [
     "MONSTERS_FILE",
     "FINGERPRINTS_FILE",
     "TELEPORT_DESTINATIONS_FILE",
+    "SMALL_ACCOUNTS_FILE",
     "QUICK_LOGINS_FILE",
     "BUY_ITEMS_FILE",
     "LIAOGUO_PAIRS_FILE",

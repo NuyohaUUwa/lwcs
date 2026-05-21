@@ -27,6 +27,10 @@ let liaoguoPairs = [];
 let selectedLiaoguoPairKey = '';
 let scheduledTasksConfig = null;
 let battleMonsters = [];
+let smallAccounts = [];
+let smallStatusItems = [];
+let smallStatusPollTimer = null;
+let ladderBattleLogActive = false;
 let selectedMonsterCode = '';
 let battleLogMode = 'simple'; // simple | detail
 let autoUseRules = [];
@@ -67,13 +71,17 @@ function clearMsg(elId) {
 
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach((b, i) => {
-    const names = ['probe', 'backpack', 'chat', 'battle', 'tools'];
+    const names = ['probe', 'backpack', 'chat', 'battle', 'ladder', 'tools'];
     b.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab-content').forEach(el => {
     el.classList.toggle('active', el.id === 'tab-' + name);
   });
   if (name === 'probe') loadPackets();
+  if (name === 'ladder') {
+    loadSmallAccounts();
+    refreshSmallStatus(true);
+  }
 }
 
 // ================================================================== //
@@ -116,6 +124,7 @@ function startSSE() {
       else if (msg.type === 'control_log') onControlLog(msg.data);
       else if (msg.type === 'auto_use') onAutoUseEvent(msg.data);
       else if (msg.type === 'monsters') renderMonsterList(msg.data);
+      else if (msg.type === 'ladder_team') onLadderTeamEvent(msg.data);
     } catch (_) {}
   }, () => {
     setTimeout(startSSE, 3000);
@@ -1538,16 +1547,21 @@ function appendBattlePacketLine(record) {
 async function onBattleResponse(data) {
   updateBattleState(data?.battle_state || {});
   if (battleLogMode === 'detail') appendBattleLog(data, 'response');
+  appendLadderBattleLogFromEvent('response', data);
 }
 
 function onBattleEnd(data) {
   updateBattleState(data?.battle_state || {});
   if (data?.no_energy) {
     appendBattleLog({ raw_text: '内力不足' }, 'end');
+    appendLadderBattleLog('内力不足，天梯战斗结束', 'end');
+    ladderBattleLogActive = false;
     return;
   }
   const n = Number(data?.battle_state?.total_count || battleState.total_count || 0);
   appendBattleLog({ raw_text: `第${n}次 战斗结束` }, 'end');
+  appendLadderBattleLog(`第${n || 1}次 战斗结束`, 'end');
+  ladderBattleLogActive = false;
 }
 
 function buildE207SettlementDisplayText(data) {
@@ -1570,6 +1584,8 @@ function onBattleSettlementE207(data) {
   const settlementBody = buildE207SettlementDisplayText(data) || raw;
   if (raw.includes('失去') || data?.outcome === 'defeat') {
     appendBattleLog({ raw_text: `结算：失败 — ${settlementBody}` }, 'end');
+    appendLadderBattleLog(`结算：失败 - ${settlementBody}`, 'end');
+    ladderBattleLogActive = false;
     return;
   }
   const gCopper = (typeof data?.gold === 'number')
@@ -1588,15 +1604,23 @@ function onBattleSettlementE207(data) {
     ? `结算：${settlementBody}`
     : `结算：本次获得经验 ${resultExp} / 金币 ${resultGold}`;
   appendBattleLog({ raw_text: detailLine }, 'end');
+  appendLadderBattleLog(detailLine, 'end');
+  ladderBattleLogActive = false;
 }
 
 async function onBattleNotKilled(data) {
   updateBattleState(data?.battle_state || {});
   if (battleLogMode === 'detail') appendBattleLog(data, 'response');
+  appendLadderBattleLogFromEvent('not_killed', data);
 }
 
 function onBattleState(data) {
   updateBattleState(data || {});
+  if (ladderBattleLogActive && data?.state === 'error') {
+    const err = data?.last_result?.error || '战斗流程异常';
+    appendLadderBattleLog(`天梯战斗异常：${err}`, 'end');
+    ladderBattleLogActive = false;
+  }
 }
 
 function updateBattleStatsText() {
@@ -2571,6 +2595,271 @@ async function sendRoleStatPacket() {
   await sendToolPacket(packetHex);
 }
 
+function setLadderResult(text, type = 'info') {
+  showMsg('ladder-result', text, type);
+}
+
+function clearLadderBattleLog() {
+  const box = document.getElementById('ladder-battle-log');
+  if (box) box.innerHTML = '';
+}
+
+function appendLadderBattleLog(text, kind = 'response') {
+  if (!ladderBattleLogActive) return;
+  const box = document.getElementById('ladder-battle-log');
+  if (!box) return;
+  const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  const div = document.createElement('div');
+  div.className = `ladder-log-item ${kind === 'end' ? 'end' : ''}`;
+  div.textContent = `【${t}】 ${text}`;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendLadderBattleLogFromEvent(kind, data) {
+  if (!ladderBattleLogActive) return;
+  const state = String(data?.battle_state?.state || battleState.state || '');
+  const raw = String(data?.raw_text || '').trim();
+  if (kind === 'response') {
+    appendLadderBattleLog('收到战斗启动响应，主号已发送攻击');
+    return;
+  }
+  if (kind === 'not_killed') {
+    appendLadderBattleLog(raw ? `战斗继续：${raw}` : `战斗继续，当前状态 ${state || '进行中'}`);
+  }
+}
+
+async function sendLadderChallenge() {
+  const raw = String(document.getElementById('ladder-floor')?.value || '').trim();
+  if (!/^\d+$/.test(raw)) {
+    setLadderResult('楼层必须是 1~20 的整数', 'err');
+    return;
+  }
+  const res = await api('POST', '/api/ladder/challenge', { floor: Number(raw) }).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '单梯挑战发送失败', 'err');
+    return;
+  }
+  ladderBattleLogActive = true;
+  clearLadderBattleLog();
+  updateBattleState(res.battle_state || {});
+  const meta = document.getElementById('ladder-challenge-meta');
+  if (meta) meta.textContent = `targetIdLE: ${res.target_id_le || ''}`;
+  appendBattleLog({ raw_text: `天梯挑战开始：${res.floor} 层` }, 'response');
+  appendLadderBattleLog(`天梯挑战开始：${res.floor} 层，等待服务器响应`);
+  setLadderResult(`单梯挑战已入队：${res.floor} 层，已进入单次战斗流程`, 'ok');
+}
+
+function parseInviteUserIdsInput() {
+  const raw = String(document.getElementById('ladder-invite-user-ids')?.value || '').trim();
+  return raw.split(/[\s,，;；]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
+}
+
+async function sendLadderInvite(includeManagedOnline) {
+  const body = {
+    target_user_ids: includeManagedOnline ? [] : parseInviteUserIdsInput(),
+    include_managed_online: !!includeManagedOnline,
+  };
+  const res = await api('POST', '/api/ladder/team/invite', body).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '组队邀请发送失败', 'err');
+    return;
+  }
+  setLadderResult(`组队邀请已入队：${(res.invited || []).join(', ')}`, 'ok');
+}
+
+function clearSmallAccountForm() {
+  const accountEl = document.getElementById('small-account-account');
+  const passwordEl = document.getElementById('small-account-password');
+  if (accountEl) accountEl.value = '';
+  if (passwordEl) passwordEl.value = '';
+}
+
+function renderSmallAccounts(items) {
+  smallAccounts = Array.isArray(items) ? items : [];
+  const box = document.getElementById('small-account-list');
+  if (!box) return;
+  if (!smallAccounts.length) {
+    box.innerHTML = '<div class="ladder-empty">暂无小号</div>';
+    return;
+  }
+  box.innerHTML = smallAccounts.map((item, idx) => {
+    const account = escAttr(item.account || '');
+    const statusItem = smallStatusItems.find((x) => x.account === item.account);
+    const running = !!statusItem && !['stopped', 'offline'].includes(String(statusItem.status || ''));
+    const toggleLabel = running ? '停止' : '启动';
+    const toggleClass = running ? 'btn-danger' : 'btn-success';
+    const label = `${idx + 1}. ${escHtml(item.account || '')}`;
+    const last = item.last_user_id ? ` · 上次角色ID ${escHtml(item.last_user_id)}` : '';
+    return `<div style="border:1px solid var(--border); border-radius:6px; padding:6px; margin-bottom:6px;">
+      <div style="font-size:12px; margin-bottom:6px;">${label}${last}</div>
+      <div class="battle-row">
+        <button class="btn ${toggleClass} btn-sm" onclick="toggleSmallAccount('${account}')">${toggleLabel}</button>
+        <button class="btn btn-ghost btn-sm" onclick="editSmallAccount('${account}')">编辑</button>
+        <button class="btn btn-ghost btn-sm" onclick="moveSmallAccount('${account}', 'up')">上移</button>
+        <button class="btn btn-ghost btn-sm" onclick="moveSmallAccount('${account}', 'down')">下移</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteSmallAccount('${account}')">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function loadSmallAccounts() {
+  const res = await api('GET', '/api/ladder/small-accounts').catch(() => null);
+  if (!res?.ok) {
+    renderSmallAccounts([]);
+    return;
+  }
+  renderSmallAccounts(res.items || []);
+}
+
+function isSmallAccountRunning(account) {
+  const item = smallStatusItems.find((x) => x.account === account);
+  return !!item && !['stopped', 'offline'].includes(String(item.status || ''));
+}
+
+async function toggleSmallAccount(account) {
+  if (isSmallAccountRunning(account)) {
+    await stopSmallAccount(account);
+    return;
+  }
+  await startSmallAccount(account);
+}
+
+function editSmallAccount(account) {
+  const item = smallAccounts.find((x) => x.account === account);
+  if (!item) return;
+  const accountEl = document.getElementById('small-account-account');
+  const passwordEl = document.getElementById('small-account-password');
+  if (accountEl) accountEl.value = item.account || '';
+  if (passwordEl) passwordEl.value = item.password || '';
+}
+
+async function saveSmallAccount() {
+  const account = String(document.getElementById('small-account-account')?.value || '').trim();
+  const password = String(document.getElementById('small-account-password')?.value || '').trim();
+  const res = await api('POST', '/api/ladder/small-accounts', { account, password }).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '保存小号失败', 'err');
+    return;
+  }
+  renderSmallAccounts(res.items || []);
+  clearSmallAccountForm();
+  setLadderResult('小号已保存', 'ok');
+}
+
+async function deleteSmallAccount(account) {
+  const res = await api('DELETE', `/api/ladder/small-accounts/${encodeURIComponent(account)}`).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '删除小号失败', 'err');
+    return;
+  }
+  renderSmallAccounts(res.items || []);
+  setLadderResult('小号已删除', 'ok');
+}
+
+async function moveSmallAccount(account, direction) {
+  const res = await api('PUT', `/api/ladder/small-accounts/${encodeURIComponent(account)}`, { direction }).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '调整小号顺序失败', 'err');
+    return;
+  }
+  renderSmallAccounts(res.items || []);
+}
+
+async function startSmallAccount(account) {
+  const res = await api('POST', '/api/ladder/small/start-one', { account }).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '启动小号失败', 'err');
+    return;
+  }
+  renderSmallStatus(res.items || []);
+  ensureSmallStatusPolling();
+  setLadderResult(`已请求启动小号：${(res.started || []).join(', ')}`, 'ok');
+}
+
+async function stopSmallAccount(account) {
+  const res = await api('POST', '/api/ladder/small/stop-one', { account }).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '停止小号失败', 'err');
+    return;
+  }
+  renderSmallStatus(res.items || []);
+  renderSmallAccounts(smallAccounts);
+  setLadderResult(`已请求停止小号：${account}`, 'ok');
+}
+
+function renderSmallStatus(items) {
+  smallStatusItems = Array.isArray(items) ? items : [];
+  const list = smallStatusItems.filter((item) => !['stopped', 'offline'].includes(String(item.status || '')));
+  const box = document.getElementById('small-status-list');
+  if (!box) return;
+  if (!list.length) {
+    box.innerHTML = '<div class="ladder-empty">暂无托管小号</div>';
+    renderSmallAccounts(smallAccounts);
+    return;
+  }
+  box.innerHTML = list.map((item) => {
+    const status = item.status || 'offline';
+    const role = item.role_name || item.role_id || '未选角';
+    const age = item.last_recv_age !== null && item.last_recv_age !== undefined ? ` · ${item.last_recv_age}s` : '';
+    const err = item.error ? `<div class="text-red text-sm">${escHtml(item.error)}</div>` : '';
+    return `<div style="border:1px solid var(--border); border-radius:6px; padding:6px; margin-bottom:6px;">
+      <div class="battle-row">
+        <span class="small-status-badge ${escAttr(status)}">${escHtml(status)}</span>
+        <span>${escHtml(item.account || '')} · ${escHtml(role)}${age}</span>
+      </div>
+      <div class="ladder-meta">userId: ${escHtml(item.role_id || item.last_user_id || '—')}</div>
+      ${err}
+    </div>`;
+  }).join('');
+  renderSmallAccounts(smallAccounts);
+}
+
+async function refreshSmallStatus(silent = true) {
+  const res = await api('GET', '/api/ladder/small/status').catch(() => null);
+  if (!res?.ok) {
+    if (!silent) setLadderResult(res?.error || '读取小号状态失败', 'err');
+    return;
+  }
+  renderSmallStatus(res.items || []);
+}
+
+function ensureSmallStatusPolling() {
+  if (smallStatusPollTimer) return;
+  smallStatusPollTimer = setInterval(() => {
+    const active = document.getElementById('tab-ladder')?.classList.contains('active');
+    if (active) refreshSmallStatus(true);
+  }, 3000);
+}
+
+async function startSmallAccounts() {
+  const res = await api('POST', '/api/ladder/small/start', {}).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '启动小号失败', 'err');
+    return;
+  }
+  renderSmallStatus(res.items || []);
+  ensureSmallStatusPolling();
+  setLadderResult(`已请求启动小号：${(res.started || []).join(', ')}`, 'ok');
+}
+
+async function stopSmallAccounts() {
+  const res = await api('POST', '/api/ladder/small/stop', {}).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '停止小号失败', 'err');
+    return;
+  }
+  renderSmallStatus(res.items || []);
+  setLadderResult('已请求停止小号', 'ok');
+}
+
+function onLadderTeamEvent(data) {
+  const message = String(data?.message || '').trim();
+  if (!message) return;
+  setLadderResult(`组队状态：${message}`, data?.event === 'joined' ? 'ok' : 'info');
+}
+
 function applyCustomPacketRandomNum(hexStr) {
   const cleanHex = String(hexStr || '').replace(/\s+/g, '').toLowerCase();
   const mode = document.getElementById('custom-random-mode')?.value || 'hex4';
@@ -2757,6 +3046,9 @@ function toggleCollapseMode() {
   loadMonsters();
   loadAutoUseRules();
   loadQuickLogins();
+  loadSmallAccounts();
+  refreshSmallStatus(true);
+  ensureSmallStatusPolling();
   loadBuyItems();
   loadGold();
   await loadLiaoguoPairs();

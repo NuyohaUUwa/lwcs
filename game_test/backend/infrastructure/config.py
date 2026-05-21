@@ -13,6 +13,7 @@ elif __name__ == "game_test.backend.infrastructure.config":
 LOGIN_SERVERS = {
     "龙一服": {"ip": "8.141.22.68", "port": 9988},
     "龙二服": {"ip": "60.205.231.81", "port": 9991},
+    "其他": {"ip": "8.141.22.68", "port": 9977},
 }
 
 # 游戏服务器配置（选角/进游戏）

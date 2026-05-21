@@ -10,7 +10,14 @@ import time
 from game_test.backend.domain.combat.battle import DEFAULT_MONSTERS
 from game_test.backend.runtime import get_session
 
-from .paths import BUY_ITEMS_FILE, LIAOGUO_PAIRS_FILE, MONSTERS_FILE, QUICK_LOGINS_FILE, SCHEDULED_TASKS_FILE
+from .paths import (
+    BUY_ITEMS_FILE,
+    LIAOGUO_PAIRS_FILE,
+    MONSTERS_FILE,
+    QUICK_LOGINS_FILE,
+    SCHEDULED_TASKS_FILE,
+    SMALL_ACCOUNTS_FILE,
+)
 
 _CURRENT_MODULE = sys.modules[__name__]
 if __name__ == "backend.infrastructure.data_manager":
@@ -129,6 +136,139 @@ def delete_quick_login(item_id: str):
     new_items = [x for x in items if x.get("id") != item_id]
     save_quick_logins(new_items)
     return {"ok": True, "items": new_items}
+
+
+def _normalize_main_account(main_account: str) -> str:
+    return str(main_account or "").strip()
+
+
+def _normalize_small_account_entry(item: dict) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    account = str(item.get("account", "")).strip()
+    password = str(item.get("password", "")).strip()
+    if not account:
+        return None
+    entry = {
+        "id": account,
+        "account": account,
+        "password": password,
+        "last_user_id": str(item.get("last_user_id", "")).strip().lower(),
+    }
+    return entry
+
+
+def load_small_accounts_data():
+    data = _read_json_file(SMALL_ACCOUNTS_FILE, {})
+    if isinstance(data, dict) and isinstance(data.get("groups"), dict):
+        raw_groups = data.get("groups", {})
+    elif isinstance(data, dict):
+        raw_groups = data
+    else:
+        raw_groups = {}
+    groups = {}
+    for main_account, items in raw_groups.items():
+        key = _normalize_main_account(main_account)
+        if not key or not isinstance(items, list):
+            continue
+        normalized = []
+        seen = set()
+        for item in items:
+            entry = _normalize_small_account_entry(item)
+            if not entry or entry["account"] in seen:
+                continue
+            seen.add(entry["account"])
+            normalized.append(entry)
+        groups[key] = normalized
+    return {"groups": groups}
+
+
+def save_small_accounts_data(data):
+    groups = data.get("groups", {}) if isinstance(data, dict) else {}
+    _write_json_file(SMALL_ACCOUNTS_FILE, {"groups": groups})
+
+
+def get_small_accounts(main_account: str):
+    key = _normalize_main_account(main_account)
+    if not key:
+        return {"ok": False, "error": "主号账号为空"}
+    data = load_small_accounts_data()
+    return {"ok": True, "items": [dict(x) for x in data["groups"].get(key, [])]}
+
+
+def upsert_small_account(main_account: str, body: dict):
+    key = _normalize_main_account(main_account)
+    if not key:
+        return {"ok": False, "error": "主号账号为空"}
+    entry = _normalize_small_account_entry(body)
+    if not entry:
+        return {"ok": False, "error": "小号账号不能为空"}
+    if not entry["password"]:
+        return {"ok": False, "error": "小号密码不能为空"}
+    data = load_small_accounts_data()
+    items = list(data["groups"].get(key, []))
+    replaced = False
+    for i, old in enumerate(items):
+        if old.get("account") == entry["account"]:
+            if not entry["last_user_id"]:
+                entry["last_user_id"] = str(old.get("last_user_id", "")).strip().lower()
+            items[i] = entry
+            replaced = True
+            break
+    if not replaced:
+        items.append(entry)
+    data["groups"][key] = items
+    save_small_accounts_data(data)
+    return {"ok": True, "items": [dict(x) for x in items], "saved_id": entry["id"]}
+
+
+def delete_small_account(main_account: str, account: str):
+    key = _normalize_main_account(main_account)
+    target = str(account or "").strip()
+    if not key:
+        return {"ok": False, "error": "主号账号为空"}
+    data = load_small_accounts_data()
+    items = list(data["groups"].get(key, []))
+    new_items = [x for x in items if x.get("account") != target]
+    data["groups"][key] = new_items
+    save_small_accounts_data(data)
+    return {"ok": True, "items": [dict(x) for x in new_items]}
+
+
+def move_small_account(main_account: str, account: str, direction: str):
+    key = _normalize_main_account(main_account)
+    target = str(account or "").strip()
+    if not key:
+        return {"ok": False, "error": "主号账号为空"}
+    data = load_small_accounts_data()
+    items = list(data["groups"].get(key, []))
+    idx = next((i for i, x in enumerate(items) if x.get("account") == target), -1)
+    if idx < 0:
+        return {"ok": False, "error": "小号不存在"}
+    step = -1 if direction == "up" else 1 if direction == "down" else 0
+    new_idx = idx + step
+    if step and 0 <= new_idx < len(items):
+        items[idx], items[new_idx] = items[new_idx], items[idx]
+    data["groups"][key] = items
+    save_small_accounts_data(data)
+    return {"ok": True, "items": [dict(x) for x in items]}
+
+
+def update_small_account_last_user_id(main_account: str, account: str, user_id: str):
+    key = _normalize_main_account(main_account)
+    target = str(account or "").strip()
+    clean_user_id = str(user_id or "").strip().lower()
+    if not key or not target or not clean_user_id:
+        return {"ok": False, "error": "缺少必要字段"}
+    data = load_small_accounts_data()
+    items = list(data["groups"].get(key, []))
+    for item in items:
+        if item.get("account") == target:
+            item["last_user_id"] = clean_user_id
+            data["groups"][key] = items
+            save_small_accounts_data(data)
+            return {"ok": True, "items": [dict(x) for x in items]}
+    return {"ok": False, "error": "小号不存在"}
 
 
 def load_buy_items():
@@ -323,6 +463,13 @@ __all__ = [
     "save_quick_logins",
     "upsert_quick_login",
     "delete_quick_login",
+    "load_small_accounts_data",
+    "save_small_accounts_data",
+    "get_small_accounts",
+    "upsert_small_account",
+    "delete_small_account",
+    "move_small_account",
+    "update_small_account_last_user_id",
     "load_buy_items",
     "save_buy_items",
     "upsert_buy_item",

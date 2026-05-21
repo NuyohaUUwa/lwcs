@@ -421,6 +421,12 @@ def _handle_banned_role_packet():
     if not _schedule_banned_reconnect("该角色已被禁封", delay_s=10 * 60):
         return
     session = get_session()
+    try:
+        from game_test.backend.domain.ladder.small_runtime import small_account_manager
+
+        small_account_manager.stop_all()
+    except Exception as small_err:
+        print(f"[flow] 角色禁封时停止小号失败: {small_err}")
     _emit_control_log("检测到角色禁封，后端将在 10 分钟后自动重连", level="warn", scope="reconnect")
     reset_battle_state(preserve_loop=True)
     with session._lock:
@@ -431,6 +437,26 @@ def _handle_banned_role_packet():
     session.clear_connection_runtime()
     session.notify_status_change()
     session.notify_battle_state()
+
+
+def _maybe_emit_team_packet_event(packet_hex: str, fingerprint: str) -> bool:
+    if fingerprint not in ("e8030100fa07", "e8030100fd07"):
+        return False
+    session = get_session()
+    text = extract_utf8_segments(packet_hex)
+    if "成功发送组队消息" in text:
+        session._notify_sse(
+            "ladder_team",
+            {"event": "invite_sent", "message": "成功发送组队消息，等待对方回应", "raw_text": text},
+        )
+        return True
+    if "加入队伍" in text:
+        session._notify_sse(
+            "ladder_team",
+            {"event": "joined", "message": "加入队伍", "raw_text": text},
+        )
+        return True
+    return False
 
 
 def _set_status(status: str):
@@ -445,6 +471,13 @@ def _default_disconnect_handler(error: Exception):
     if not session.connected and session.connection_status == "disconnected":
         return
     print(f"[flow] 游戏连接断开: {error}")
+    try:
+        from game_test.backend.domain.ladder.small_runtime import small_account_manager
+
+        small_account_manager.stop_all()
+        _emit_control_log("主号断线，已断开所有托管小号", level="warn", scope="ladder")
+    except Exception as small_err:
+        print(f"[flow] 停止小号失败: {small_err}")
     preserve_loop = bool(session.battle_loop_running)
     reset_battle_state(preserve_loop=preserve_loop)
     with session._lock:
@@ -479,6 +512,7 @@ def _dispatch_single_incoming_packet(raw_bytes: bytes) -> None:
         from game_test.backend.application.flow_service import handle_world_boss_packet
 
         handle_world_boss_packet(hex_str)
+    _maybe_emit_team_packet_event(hex_str, fingerprint)
     if fingerprint == GOLD_STATUS_FINGERPRINT:
         handle_gold_status_packet(hex_str)
         return
@@ -748,6 +782,12 @@ def select_role_flow(role_id: str) -> dict[str, Any]:
 
 def disconnect_flow() -> dict[str, Any]:
     session = get_session()
+    try:
+        from game_test.backend.domain.ladder.small_runtime import small_account_manager
+
+        small_account_manager.stop_all()
+    except Exception as small_err:
+        print(f"[flow] 手动断开时停止小号失败: {small_err}")
     if session.battle_loop_running:
         # 循环战斗中手动断开时，清掉“等待响应中”的战斗态，避免后续重连后因旧状态拦截再次启动。
         reset_battle_state(preserve_loop=True)

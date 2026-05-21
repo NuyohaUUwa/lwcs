@@ -7,6 +7,7 @@ from .battle import blueprint as battle_blueprint
 from .flow import blueprint as flow_blueprint
 from .gold import blueprint as gold_blueprint
 from .inventory import blueprint as inventory_blueprint
+from .ladder import blueprint as ladder_blueprint
 from .packet import blueprint as packet_blueprint
 from .settings import blueprint as settings_blueprint
 from .status import blueprint as status_blueprint
@@ -19,6 +20,7 @@ def register_api_routes(app: Flask) -> None:
     app.register_blueprint(inventory_blueprint)
     app.register_blueprint(gold_blueprint)
     app.register_blueprint(battle_blueprint)
+    app.register_blueprint(ladder_blueprint)
     app.register_blueprint(world_blueprint)
     app.register_blueprint(packet_blueprint)
     app.register_blueprint(settings_blueprint)
