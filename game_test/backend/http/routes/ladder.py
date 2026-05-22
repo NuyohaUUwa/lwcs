@@ -4,14 +4,17 @@ from flask import Blueprint, jsonify, request
 
 from ...application.ladder_service import (
     challenge_ladder,
+    get_ladder_auto_status,
     get_small_status,
     invite_team,
     list_small_accounts,
     remove_small_account,
     reorder_small_account,
     save_small_account,
+    start_ladder_auto,
     start_small_account,
     start_small_accounts,
+    stop_ladder_auto,
     stop_small_account,
     stop_small_accounts,
 )
@@ -24,6 +27,21 @@ blueprint = Blueprint("http_ladder", __name__, url_prefix="/api")
 @blueprint.route("/ladder/challenge", methods=["POST"])
 def api_ladder_challenge():
     return _json_ok(challenge_ladder(get_json_body()))
+
+
+@blueprint.route("/ladder/auto/start", methods=["POST"])
+def api_ladder_auto_start():
+    return _json_ok(start_ladder_auto(get_json_body()))
+
+
+@blueprint.route("/ladder/auto/stop", methods=["POST"])
+def api_ladder_auto_stop():
+    return _json_ok(stop_ladder_auto())
+
+
+@blueprint.route("/ladder/auto/status", methods=["GET"])
+def api_ladder_auto_status():
+    return jsonify(get_ladder_auto_status())
 
 
 @blueprint.route("/ladder/team/invite", methods=["POST"])

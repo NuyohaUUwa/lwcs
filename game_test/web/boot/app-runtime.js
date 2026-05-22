@@ -31,6 +31,7 @@ let smallAccounts = [];
 let smallStatusItems = [];
 let smallStatusPollTimer = null;
 let ladderBattleLogActive = false;
+let ladderAutoState = { running: false, start_floor: 1, end_floor: 1, current_floor: 0, completed_floor: 0, last_error: '' };
 let selectedMonsterCode = '';
 let battleLogMode = 'simple'; // simple | detail
 let autoUseRules = [];
@@ -125,6 +126,7 @@ function startSSE() {
       else if (msg.type === 'auto_use') onAutoUseEvent(msg.data);
       else if (msg.type === 'monsters') renderMonsterList(msg.data);
       else if (msg.type === 'ladder_team') onLadderTeamEvent(msg.data);
+      else if (msg.type === 'ladder_auto') onLadderAutoEvent(msg.data);
     } catch (_) {}
   }, () => {
     setTimeout(startSSE, 3000);
@@ -2650,6 +2652,80 @@ async function sendLadderChallenge() {
   setLadderResult(`单梯挑战已入队：${res.floor} 层，已进入单次战斗流程`, 'ok');
 }
 
+function renderLadderAutoState(data) {
+  ladderAutoState = { ...ladderAutoState, ...(data || {}) };
+  const btn = document.getElementById('btn-ladder-auto');
+  if (btn) {
+    btn.textContent = ladderAutoState.running ? '停止一键挑战' : '一键挑战';
+    btn.classList.toggle('btn-danger', !!ladderAutoState.running);
+    btn.classList.toggle('btn-success', !ladderAutoState.running);
+  }
+  const el = document.getElementById('ladder-auto-status');
+  if (!el) return;
+  if (ladderAutoState.running) {
+    el.textContent = `运行中：${ladderAutoState.current_floor || '-'} / ${ladderAutoState.end_floor || '-'}`;
+  } else if (ladderAutoState.last_error) {
+    el.textContent = `已停止：${ladderAutoState.last_error}`;
+  } else if (ladderAutoState.completed_floor) {
+    el.textContent = `已完成到第 ${ladderAutoState.completed_floor} 层`;
+  } else {
+    el.textContent = '未启动';
+  }
+}
+
+async function refreshLadderAutoStatus() {
+  const res = await api('GET', '/api/ladder/auto/status').catch(() => null);
+  if (res?.ok) renderLadderAutoState(res);
+}
+
+async function toggleLadderAuto() {
+  if (ladderAutoState.running) {
+    const res = await api('POST', '/api/ladder/auto/stop', {}).catch(() => null);
+    if (!res?.ok) {
+      setLadderResult(res?.error || '停止一键挑战失败', 'err');
+      return;
+    }
+    renderLadderAutoState(res);
+    setLadderResult('已请求停止一键挑战', 'info');
+    return;
+  }
+  const startRaw = String(document.getElementById('ladder-auto-start-floor')?.value || '1').trim() || '1';
+  const endRaw = String(document.getElementById('ladder-auto-end-floor')?.value || '').trim();
+  if (!/^\d+$/.test(startRaw) || !/^\d+$/.test(endRaw)) {
+    setLadderResult('一键挑战需要填写起始层和结束层', 'err');
+    return;
+  }
+  ladderBattleLogActive = true;
+  clearLadderBattleLog();
+  const res = await api('POST', '/api/ladder/auto/start', {
+    start_floor: Number(startRaw),
+    end_floor: Number(endRaw),
+  }).catch(() => null);
+  if (!res?.ok) {
+    setLadderResult(res?.error || '启动一键挑战失败', 'err');
+    ladderBattleLogActive = false;
+    return;
+  }
+  renderLadderAutoState(res);
+  appendLadderBattleLog(`一键挑战启动：${startRaw}~${endRaw} 层`);
+  setLadderResult(`一键挑战已启动：${startRaw}~${endRaw} 层`, 'ok');
+}
+
+function onLadderAutoEvent(data) {
+  const event = String(data?.event || '');
+  if (event === 'started') {
+    ladderBattleLogActive = true;
+    clearLadderBattleLog();
+  }
+  if (data?.message) {
+    appendLadderBattleLog(String(data.message), ['finished', 'stopped', 'error'].includes(event) ? 'end' : 'response');
+  }
+  refreshLadderAutoStatus();
+  if (['finished', 'stopped', 'error'].includes(event)) {
+    if (event !== 'error') ladderBattleLogActive = false;
+  }
+}
+
 function parseInviteUserIdsInput() {
   const raw = String(document.getElementById('ladder-invite-user-ids')?.value || '').trim();
   return raw.split(/[\s,，;；]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
@@ -2804,9 +2880,13 @@ function renderSmallStatus(items) {
     const role = item.role_name || item.role_id || '未选角';
     const age = item.last_recv_age !== null && item.last_recv_age !== undefined ? ` · ${item.last_recv_age}s` : '';
     const err = item.error ? `<div class="text-red text-sm">${escHtml(item.error)}</div>` : '';
+    const joined = item.team_joined ? '<span class="small-status-badge online">已入队</span>' : '<span class="small-status-badge stopped">未入队</span>';
+    const checkin = item.checkin_sent ? '<span class="small-status-badge online">已签到</span>' : '';
     return `<div style="border:1px solid var(--border); border-radius:6px; padding:6px; margin-bottom:6px;">
       <div class="battle-row">
         <span class="small-status-badge ${escAttr(status)}">${escHtml(status)}</span>
+        ${joined}
+        ${checkin}
         <span>${escHtml(item.account || '')} · ${escHtml(role)}${age}</span>
       </div>
       <div class="ladder-meta">userId: ${escHtml(item.role_id || item.last_user_id || '—')}</div>
@@ -3048,6 +3128,7 @@ function toggleCollapseMode() {
   loadQuickLogins();
   loadSmallAccounts();
   refreshSmallStatus(true);
+  refreshLadderAutoStatus();
   ensureSmallStatusPolling();
   loadBuyItems();
   loadGold();

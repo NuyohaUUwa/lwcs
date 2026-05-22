@@ -451,9 +451,16 @@ def _maybe_emit_team_packet_event(packet_hex: str, fingerprint: str) -> bool:
         )
         return True
     if "加入队伍" in text:
+        joined = []
+        try:
+            from game_test.backend.domain.ladder.small_runtime import small_account_manager
+
+            joined = small_account_manager.mark_joined_from_text(text)
+        except Exception as exc:
+            print(f"[flow] 标记小号入队失败: {exc}")
         session._notify_sse(
             "ladder_team",
-            {"event": "joined", "message": "加入队伍", "raw_text": text},
+            {"event": "joined", "message": "加入队伍", "raw_text": text, "joined": joined},
         )
         return True
     return False

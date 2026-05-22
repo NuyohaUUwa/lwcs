@@ -606,6 +606,14 @@
           <button class="btn btn-primary btn-sm" onclick="sendLadderChallenge()">发送挑战</button>
           <span class="ladder-meta" id="ladder-challenge-meta">目标 ID 由后端计算</span>
         </div>
+        <div class="battle-row mt-8">
+          <span class="text-muted">从：</span>
+          <input type="text" id="ladder-auto-start-floor" inputmode="numeric" autocomplete="off" value="1" placeholder="1" style="width:72px; padding:4px 8px; font-size:12px;">
+          <span class="text-muted">到：</span>
+          <input type="text" id="ladder-auto-end-floor" inputmode="numeric" autocomplete="off" placeholder="20" style="width:72px; padding:4px 8px; font-size:12px;">
+          <button class="btn btn-success btn-sm" id="btn-ladder-auto" onclick="toggleLadderAuto()">一键挑战</button>
+          <span class="ladder-meta" id="ladder-auto-status">未启动</span>
+        </div>
       </div>
 
       <div class="battle-box">

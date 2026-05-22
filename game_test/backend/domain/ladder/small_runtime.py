@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import binascii
+import random
 import socket
 import threading
 import time
@@ -37,6 +38,7 @@ _IGNORED_FINGERPRINTS = {
 }
 _BATTLE_LIST_FINGERPRINTS = {"e8030100de07", "e8030100df07", "e8030100e407"}
 _TEAM_INVITE_FINGERPRINT = "e8030100fb07"
+_DAILY_CHECKIN_PACKET_HEX = "20000000e80313007d2e08f4f505882e00000e0000000c00636865636b496e446f3f7b7d"
 
 
 def _send_all(sock: socket.socket, data: bytes) -> int:
@@ -93,11 +95,14 @@ class SmallAccountRuntime:
     expected_online: bool = False
     last_recv_ts: float = 0.0
     last_ack_ts: float = 0.0
+    team_joined: bool = False
+    checkin_sent: bool = False
     sock: socket.socket | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
     recv_thread: threading.Thread | None = None
     worker_thread: threading.Thread | None = None
     recv_buffer: bytes = b""
+    send_lock: threading.RLock = field(default_factory=threading.RLock)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +115,8 @@ class SmallAccountRuntime:
             "error": self.error,
             "reconnecting": self.reconnecting,
             "expected_online": self.expected_online,
+            "team_joined": self.team_joined,
+            "checkin_sent": self.checkin_sent,
             "last_recv_age": round(time.time() - self.last_recv_ts, 1) if self.last_recv_ts else None,
         }
 
@@ -130,6 +137,20 @@ class SmallAccountManager:
                 for runtime in self._sessions.values()
                 if runtime.status == "online" and runtime.role_id
             ]
+
+    def mark_joined_from_text(self, text: str) -> list[dict[str, str]]:
+        body = str(text or "")
+        if "加入队伍" not in body:
+            return []
+        matched = []
+        with self._lock:
+            runtimes = list(self._sessions.values())
+        for runtime in runtimes:
+            keys = (runtime.role_name, runtime.account, runtime.role_id)
+            if any(k and str(k) in body for k in keys):
+                runtime.team_joined = True
+                matched.append({"account": runtime.account, "role_id": runtime.role_id, "role_name": runtime.role_name})
+        return matched
 
     def start_first_two(self, accounts: list[dict[str, Any]]) -> dict[str, Any]:
         selected = accounts[:2]
@@ -186,6 +207,7 @@ class SmallAccountManager:
             runtime.reconnecting = False
             runtime.error = ""
             runtime.last_recv_ts = 0.0
+            runtime.team_joined = False
         return {"ok": True, "items": self.status()}
 
     def stop_one(self, account: str) -> dict[str, Any]:
@@ -203,6 +225,7 @@ class SmallAccountManager:
         runtime.reconnecting = False
         runtime.error = ""
         runtime.last_recv_ts = 0.0
+        runtime.team_joined = False
         return {"ok": True, "items": self.status()}
 
     def send_battle_ack_after_main(self, source: str = "") -> dict[str, Any]:
@@ -221,7 +244,7 @@ class SmallAccountManager:
                 sock = runtime.sock
                 if not sock:
                     continue
-                _send_hex(sock, packet_hex)
+                self._send_runtime_hex(runtime, packet_hex)
                 runtime.last_ack_ts = time.time()
                 sent.append({"account": runtime.account, "role_id": runtime.role_id})
             except Exception as exc:
@@ -235,6 +258,8 @@ class SmallAccountManager:
                 runtime.reconnecting = runtime.status == "reconnecting"
                 runtime.status = "logging_in"
                 runtime.error = ""
+                runtime.team_joined = False
+                runtime.checkin_sent = False
                 self._perform_login(runtime)
                 runtime.status = "online"
                 runtime.reconnecting = False
@@ -317,6 +342,7 @@ class SmallAccountManager:
         runtime.last_user_id = role_id
         if main_account:
             update_small_account_last_user_id(main_account, runtime.account, role_id)
+        self._send_daily_checkin(runtime)
 
     @staticmethod
     def _select_role(roles: list[dict[str, Any]], last_user_id: str, main_role_index: int) -> dict[str, Any]:
@@ -367,6 +393,7 @@ class SmallAccountManager:
                 runtime.reconnecting = False
                 runtime.error = ""
                 runtime.last_recv_ts = 0.0
+                runtime.team_joined = False
 
     def _handle_packet(self, runtime: SmallAccountRuntime, frame: bytes) -> None:
         packet_hex = frame.hex()
@@ -381,7 +408,7 @@ class SmallAccountManager:
             with main._lock:
                 main_role_name = main.current_role.role_name if main.current_role else ""
             if main_role_name and main_role_name.encode("utf-8").hex() in packet_hex and runtime.sock:
-                _send_hex(runtime.sock, build_team_accept_packet())
+                self._send_runtime_hex(runtime, build_team_accept_packet())
 
     def _mark_runtime_disconnected(self, runtime: SmallAccountRuntime, exc: Exception) -> None:
         self._close_runtime_socket(runtime)
@@ -397,6 +424,27 @@ class SmallAccountManager:
             runtime.reconnecting = False
             runtime.error = ""
             runtime.last_recv_ts = 0.0
+            runtime.team_joined = False
+
+    @staticmethod
+    def _build_daily_checkin_packet() -> str:
+        rand = random.randint(0, 0xFFFF).to_bytes(2, "little").hex()
+        return _DAILY_CHECKIN_PACKET_HEX.replace("08f4", rand, 1)
+
+    def _send_daily_checkin(self, runtime: SmallAccountRuntime) -> None:
+        try:
+            self._send_runtime_hex(runtime, self._build_daily_checkin_packet())
+            runtime.checkin_sent = True
+        except Exception as exc:
+            runtime.error = f"小号每日签到发送失败: {exc}"
+
+    @staticmethod
+    def _send_runtime_hex(runtime: SmallAccountRuntime, packet_hex: str) -> int:
+        sock = runtime.sock
+        if not sock:
+            raise ConnectionError("小号 socket 不可用")
+        with runtime.send_lock:
+            return _send_hex(sock, packet_hex)
 
     @staticmethod
     def _close_runtime_socket(runtime: SmallAccountRuntime) -> None:
