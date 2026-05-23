@@ -121,36 +121,52 @@ def _recover_small_team(run_id: int, stop_event: threading.Event) -> dict[str, A
         return {"ok": False, "stopped": True, "error": "已停止"}
 
     _emit_ladder_event("recover_start", f"正在恢复托管小号：{', '.join(targets)}")
-    small_account_manager.stop_targets(targets)
-    if stop_event.is_set():
-        return {"ok": False, "stopped": True, "error": "已停止"}
-
     account_res = list_small_accounts()
     if not account_res.get("ok"):
         return account_res
     items = list(account_res.get("items", []))
-    small_account_manager.reset_team_joined_for_targets(targets)
-    start_res = small_account_manager.start_targets(targets, items, force=True)
-    if not start_res.get("ok"):
-        return start_res
 
-    online_res = small_account_manager.wait_targets_online(targets, _SMALL_ONLINE_WAIT_S, stop_event=stop_event)
-    if not online_res.get("ok"):
-        return online_res
-    if not _is_current_run(run_id):
-        return {"ok": False, "stale": True, "error": "一键挑战已被新的运行替换"}
+    restart_targets = list(targets)
+    for attempt in range(1, 3):
+        if stop_event.is_set():
+            return {"ok": False, "stopped": True, "error": "已停止"}
 
-    invite_res = invite_team({"include_managed_online": True})
-    if not invite_res.get("ok"):
-        return invite_res
+        small_account_manager.stop_targets(restart_targets)
+        if stop_event.is_set():
+            return {"ok": False, "stopped": True, "error": "已停止"}
 
-    if stop_event.wait(1.0):
-        return {"ok": False, "stopped": True, "error": "已停止"}
-    join_res = small_account_manager.wait_targets_joined(targets, _SMALL_JOIN_WAIT_S, stop_event=stop_event)
-    if not join_res.get("ok"):
+        small_account_manager.reset_team_joined_for_targets(restart_targets)
+        start_res = small_account_manager.start_targets(restart_targets, items, force=True)
+        if not start_res.get("ok"):
+            return start_res
+
+        online_res = small_account_manager.wait_targets_online(targets, _SMALL_ONLINE_WAIT_S, stop_event=stop_event)
+        if not online_res.get("ok"):
+            return online_res
+        if not _is_current_run(run_id):
+            return {"ok": False, "stale": True, "error": "一键挑战已被新的运行替换"}
+
+        invite_res = invite_team({"include_managed_online": True})
+        if not invite_res.get("ok"):
+            return invite_res
+
+        if stop_event.wait(1.0):
+            return {"ok": False, "stopped": True, "error": "已停止"}
+        join_res = small_account_manager.wait_targets_joined(targets, _SMALL_JOIN_WAIT_S, stop_event=stop_event)
+        if join_res.get("ok"):
+            _emit_ladder_event("recover_done", "小号已重新上线并完成组队")
+            return {"ok": True}
+
+        if join_res.get("invite_conflict") and attempt == 1:
+            restart_targets = list(join_res.get("conflict_accounts") or targets)
+            _emit_ladder_event(
+                "recover_retry",
+                f"服务器提示对方已在队伍中，正在重启小号后重新邀请：{', '.join(restart_targets)}",
+            )
+            continue
         return join_res
-    _emit_ladder_event("recover_done", "小号已重新上线并完成组队")
-    return {"ok": True}
+
+    return {"ok": False, "error": "小号恢复失败"}
 
 
 def _stop_small_accounts_after_finish() -> None:

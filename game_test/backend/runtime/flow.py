@@ -451,6 +451,24 @@ def _maybe_emit_team_packet_event(packet_hex: str, fingerprint: str) -> bool:
         return False
     session = get_session()
     text = extract_utf8_segments(packet_hex)
+    if fp == "e8030100fa07" and "对方已在队伍中" in text:
+        conflicts = []
+        try:
+            from game_test.backend.domain.ladder.small_runtime import small_account_manager
+
+            conflicts = small_account_manager.mark_invite_conflict_from_text(text)
+        except Exception as exc:
+            print(f"[flow] 标记小号入队冲突失败: {exc}")
+        session._notify_sse(
+            "ladder_team",
+            {
+                "event": "invite_conflict",
+                "message": "对方已在队伍中，准备重启未确认入队的小号",
+                "raw_text": text,
+                "conflicts": conflicts,
+            },
+        )
+        return True
     if "成功发送组队消息" in text:
         session._notify_sse(
             "ladder_team",

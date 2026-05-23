@@ -95,6 +95,7 @@ class SmallAccountRuntime:
     last_recv_ts: float = 0.0
     last_ack_ts: float = 0.0
     team_joined: bool = False
+    team_invite_conflict: bool = False
     checkin_sent: bool = False
     sock: socket.socket | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
@@ -115,6 +116,7 @@ class SmallAccountRuntime:
             "reconnecting": self.reconnecting,
             "expected_online": self.expected_online,
             "team_joined": self.team_joined,
+            "team_invite_conflict": self.team_invite_conflict,
             "checkin_sent": self.checkin_sent,
             "last_recv_age": round(time.time() - self.last_recv_ts, 1) if self.last_recv_ts else None,
         }
@@ -183,6 +185,7 @@ class SmallAccountManager:
             if not self._runtime_matches_packet(runtime, utf8_text, body_hex, body_ascii):
                 continue
             runtime.team_joined = True
+            runtime.team_invite_conflict = False
             matched.append(
                 {"account": runtime.account, "role_id": runtime.role_id, "role_name": runtime.role_name}
             )
@@ -200,10 +203,25 @@ class SmallAccountManager:
                 continue
             if self._runtime_matches_packet(runtime, body, "", body.lower()):
                 runtime.team_joined = True
+                runtime.team_invite_conflict = False
                 matched.append(
                     {"account": runtime.account, "role_id": runtime.role_id, "role_name": runtime.role_name}
                 )
         return matched
+
+    def mark_invite_conflict_from_text(self, text: str) -> list[str]:
+        if "对方已在队伍中" not in str(text or ""):
+            return []
+        conflicts = []
+        with self._lock:
+            for runtime in self._sessions.values():
+                if not runtime.expected_online or runtime.status in ("stopped", "offline"):
+                    continue
+                if runtime.team_joined:
+                    continue
+                runtime.team_invite_conflict = True
+                conflicts.append(runtime.account)
+        return conflicts
 
     def snapshot_target_accounts(self) -> list[str]:
         with self._lock:
@@ -298,13 +316,24 @@ class SmallAccountManager:
             if stop_event and stop_event.is_set():
                 return {"ok": False, "stopped": True, "error": "已停止"}
             missing = []
+            conflicts = []
             with self._lock:
                 for account in targets:
                     runtime = self._sessions.get(account)
                     if not runtime or not runtime.team_joined:
                         missing.append(account)
+                        if runtime and runtime.team_invite_conflict:
+                            conflicts.append(account)
             if not missing:
                 return {"ok": True}
+            if conflicts:
+                return {
+                    "ok": False,
+                    "invite_conflict": True,
+                    "error": f"服务器提示对方已在队伍中：{', '.join(conflicts)}",
+                    "conflict_accounts": conflicts,
+                    "missing": missing,
+                }
             if stop_event:
                 stop_event.wait(0.5)
             else:
@@ -325,6 +354,7 @@ class SmallAccountManager:
             for runtime in self._sessions.values():
                 if runtime.account in targets:
                     runtime.team_joined = False
+                    runtime.team_invite_conflict = False
 
     def start_first_two(self, accounts: list[dict[str, Any]]) -> dict[str, Any]:
         selected = accounts[:2]
@@ -387,6 +417,7 @@ class SmallAccountManager:
             runtime.error = ""
             runtime.last_recv_ts = 0.0
             runtime.team_joined = False
+            runtime.team_invite_conflict = False
         return {"ok": True, "items": self.status()}
 
     def stop_one(self, account: str) -> dict[str, Any]:
@@ -405,6 +436,7 @@ class SmallAccountManager:
         runtime.error = ""
         runtime.last_recv_ts = 0.0
         runtime.team_joined = False
+        runtime.team_invite_conflict = False
         return {"ok": True, "items": self.status()}
 
     def send_battle_ack_after_main(self, source: str = "") -> dict[str, Any]:
@@ -438,6 +470,7 @@ class SmallAccountManager:
                 runtime.status = "logging_in"
                 runtime.error = ""
                 runtime.team_joined = False
+                runtime.team_invite_conflict = False
                 runtime.checkin_sent = False
                 self._perform_login(runtime)
                 runtime.status = "online"
@@ -573,6 +606,7 @@ class SmallAccountManager:
                 runtime.error = ""
                 runtime.last_recv_ts = 0.0
                 runtime.team_joined = False
+                runtime.team_invite_conflict = False
 
     def _handle_packet(self, runtime: SmallAccountRuntime, frame: bytes) -> None:
         packet_hex = frame.hex()
@@ -607,6 +641,7 @@ class SmallAccountManager:
             runtime.error = ""
             runtime.last_recv_ts = 0.0
             runtime.team_joined = False
+            runtime.team_invite_conflict = False
 
     @staticmethod
     def _build_daily_checkin_packet() -> str:
