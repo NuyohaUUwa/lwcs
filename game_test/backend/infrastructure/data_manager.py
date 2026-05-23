@@ -216,7 +216,7 @@ def upsert_small_account(main_account: str, body: dict):
             replaced = True
             break
     if not replaced:
-        items.append(entry)
+        items.insert(0, entry)
     data["groups"][key] = items
     save_small_accounts_data(data)
     return {"ok": True, "items": [dict(x) for x in items], "saved_id": entry["id"]}

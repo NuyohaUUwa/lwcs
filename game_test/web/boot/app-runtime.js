@@ -1563,7 +1563,7 @@ function onBattleEnd(data) {
   const n = Number(data?.battle_state?.total_count || battleState.total_count || 0);
   appendBattleLog({ raw_text: `第${n}次 战斗结束` }, 'end');
   appendLadderBattleLog(`第${n || 1}次 战斗结束`, 'end');
-  ladderBattleLogActive = false;
+  if (!shouldKeepLadderBattleLog()) ladderBattleLogActive = false;
 }
 
 function buildE207SettlementDisplayText(data) {
@@ -1587,7 +1587,7 @@ function onBattleSettlementE207(data) {
   if (raw.includes('失去') || data?.outcome === 'defeat') {
     appendBattleLog({ raw_text: `结算：失败 — ${settlementBody}` }, 'end');
     appendLadderBattleLog(`结算：失败 - ${settlementBody}`, 'end');
-    ladderBattleLogActive = false;
+    if (!shouldKeepLadderBattleLog()) ladderBattleLogActive = false;
     return;
   }
   const gCopper = (typeof data?.gold === 'number')
@@ -1607,7 +1607,7 @@ function onBattleSettlementE207(data) {
     : `结算：本次获得经验 ${resultExp} / 金币 ${resultGold}`;
   appendBattleLog({ raw_text: detailLine }, 'end');
   appendLadderBattleLog(detailLine, 'end');
-  ladderBattleLogActive = false;
+  if (!shouldKeepLadderBattleLog()) ladderBattleLogActive = false;
 }
 
 async function onBattleNotKilled(data) {
@@ -1618,7 +1618,7 @@ async function onBattleNotKilled(data) {
 
 function onBattleState(data) {
   updateBattleState(data || {});
-  if (ladderBattleLogActive && data?.state === 'error') {
+  if (ladderBattleLogActive && data?.state === 'error' && !shouldKeepLadderBattleLog()) {
     const err = data?.last_result?.error || '战斗流程异常';
     appendLadderBattleLog(`天梯战斗异常：${err}`, 'end');
     ladderBattleLogActive = false;
@@ -2618,6 +2618,10 @@ function appendLadderBattleLog(text, kind = 'response') {
   box.scrollTop = box.scrollHeight;
 }
 
+function shouldKeepLadderBattleLog() {
+  return ladderBattleLogActive && !!ladderAutoState.running;
+}
+
 function appendLadderBattleLogFromEvent(kind, data) {
   if (!ladderBattleLogActive) return;
   const state = String(data?.battle_state?.state || battleState.state || '');
@@ -2718,7 +2722,8 @@ function onLadderAutoEvent(data) {
     clearLadderBattleLog();
   }
   if (data?.message) {
-    appendLadderBattleLog(String(data.message), ['finished', 'stopped', 'error'].includes(event) ? 'end' : 'response');
+    const endKinds = ['finished', 'stopped', 'error'];
+    appendLadderBattleLog(String(data.message), endKinds.includes(event) ? 'end' : 'response');
   }
   refreshLadderAutoStatus();
   if (['finished', 'stopped', 'error'].includes(event)) {
@@ -2753,12 +2758,17 @@ function clearSmallAccountForm() {
 
 function renderSmallAccounts(items) {
   smallAccounts = Array.isArray(items) ? items : [];
+  const summary = document.getElementById('small-account-list-summary');
   const box = document.getElementById('small-account-list');
   if (!box) return;
-  if (!smallAccounts.length) {
-    box.innerHTML = '<div class="ladder-empty">暂无小号</div>';
+  const count = smallAccounts.length;
+  if (summary) summary.textContent = `小号列表（${count}）`;
+  if (!count) {
+    box.className = 'small-account-list-body ladder-empty';
+    box.innerHTML = '暂无小号';
     return;
   }
+  box.className = 'small-account-list-body';
   box.innerHTML = smallAccounts.map((item, idx) => {
     const account = escAttr(item.account || '');
     const statusItem = smallStatusItems.find((x) => x.account === item.account);
@@ -2767,7 +2777,7 @@ function renderSmallAccounts(items) {
     const toggleClass = running ? 'btn-danger' : 'btn-success';
     const label = `${idx + 1}. ${escHtml(item.account || '')}`;
     const last = item.last_user_id ? ` · 上次角色ID ${escHtml(item.last_user_id)}` : '';
-    return `<div style="border:1px solid var(--border); border-radius:6px; padding:6px; margin-bottom:6px;">
+    return `<div class="small-account-item">
       <div style="font-size:12px; margin-bottom:6px;">${label}${last}</div>
       <div class="battle-row">
         <button class="btn ${toggleClass} btn-sm" onclick="toggleSmallAccount('${account}')">${toggleLabel}</button>

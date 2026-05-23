@@ -22,22 +22,21 @@ from game_test.backend.domain.roles.roles import (
 from game_test.backend.infrastructure.config import LOGIN_SERVERS, RECV_BUFSIZE
 from game_test.backend.infrastructure.data_manager import update_small_account_last_user_id
 from game_test.backend.runtime import get_session
-from game_test.core.codec import split_game_frame_bytes
+from game_test.core.codec import extract_utf8_segments, split_game_frame_bytes
 
 _IGNORED_FINGERPRINTS = {
     "e8030100514f",
     "e8030100d607",
     "e80301004d4f",
     "e80301001d57",
-    "e8030100fc07",
     "e8030100f207",
     "e8030100ed07",
-    "e8030100fd07",
     "e8030100e107",
     "e8030100e207",
 }
 _BATTLE_LIST_FINGERPRINTS = {"e8030100de07", "e8030100df07", "e8030100e407"}
 _TEAM_INVITE_FINGERPRINT = "e8030100fb07"
+_TEAM_STATE_FINGERPRINTS = {"e8030100fd07", "e8030100fc07"}
 _DAILY_CHECKIN_PACKET_HEX = "20000000e80313007d2e08f4f505882e00000e0000000c00636865636b496e446f3f7b7d"
 
 
@@ -138,6 +137,57 @@ class SmallAccountManager:
                 if runtime.status == "online" and runtime.role_id
             ]
 
+    @staticmethod
+    def _runtime_matches_packet(
+        runtime: SmallAccountRuntime,
+        utf8_text: str,
+        body_hex: str,
+        body_ascii: str,
+    ) -> bool:
+        account = str(runtime.account or "").strip()
+        if len(account) >= 2:
+            acc_lower = account.lower()
+            if acc_lower in body_ascii or acc_lower in utf8_text.lower():
+                return True
+            try:
+                if account.isascii() and account.encode("ascii").hex().lower() in body_hex:
+                    return True
+            except (UnicodeEncodeError, ValueError):
+                pass
+        role_name = str(runtime.role_name or "").strip()
+        if role_name and role_name in utf8_text:
+            return True
+        role_id = str(runtime.role_id or "").strip().lower()
+        if role_id and (role_id in utf8_text.lower() or role_id in body_hex):
+            return True
+        return False
+
+    def mark_joined_from_packet(self, packet_hex: str, fingerprint: str) -> list[dict[str, str]]:
+        fp = str(fingerprint or "").strip().lower()
+        utf8_text = extract_utf8_segments(packet_hex)
+        body_hex = packet_hex[16:].lower() if len(packet_hex) > 16 else ""
+        try:
+            body_ascii = bytes.fromhex(body_hex).decode("latin-1", errors="ignore").lower()
+        except (ValueError, binascii.Error):
+            body_ascii = ""
+
+        if fp == "e8030100fd07" and "加入队伍" not in utf8_text:
+            return []
+
+        matched = []
+        with self._lock:
+            runtimes = list(self._sessions.values())
+        for runtime in runtimes:
+            if not runtime.expected_online and runtime.status in ("stopped", "offline"):
+                continue
+            if not self._runtime_matches_packet(runtime, utf8_text, body_hex, body_ascii):
+                continue
+            runtime.team_joined = True
+            matched.append(
+                {"account": runtime.account, "role_id": runtime.role_id, "role_name": runtime.role_name}
+            )
+        return matched
+
     def mark_joined_from_text(self, text: str) -> list[dict[str, str]]:
         body = str(text or "")
         if "加入队伍" not in body:
@@ -146,11 +196,135 @@ class SmallAccountManager:
         with self._lock:
             runtimes = list(self._sessions.values())
         for runtime in runtimes:
-            keys = (runtime.role_name, runtime.account, runtime.role_id)
-            if any(k and str(k) in body for k in keys):
+            if not runtime.expected_online and runtime.status in ("stopped", "offline"):
+                continue
+            if self._runtime_matches_packet(runtime, body, "", body.lower()):
                 runtime.team_joined = True
-                matched.append({"account": runtime.account, "role_id": runtime.role_id, "role_name": runtime.role_name})
+                matched.append(
+                    {"account": runtime.account, "role_id": runtime.role_id, "role_name": runtime.role_name}
+                )
         return matched
+
+    def snapshot_target_accounts(self) -> list[str]:
+        with self._lock:
+            return [
+                runtime.account
+                for runtime in self._sessions.values()
+                if runtime.expected_online and runtime.status not in ("stopped", "offline")
+            ]
+
+    def any_target_unhealthy(self, accounts: list[str]) -> bool:
+        targets = {str(a).strip() for a in accounts if str(a).strip()}
+        if not targets:
+            return False
+        with self._lock:
+            for account in targets:
+                runtime = self._sessions.get(account)
+                if not runtime or not runtime.expected_online:
+                    return True
+                if runtime.status in ("reconnecting", "offline", "stopped"):
+                    return True
+                if runtime.error and runtime.status != "online":
+                    return True
+        return False
+
+    def stop_targets(self, accounts: list[str]) -> dict[str, Any]:
+        targets = [str(a).strip() for a in accounts if str(a).strip()]
+        for account in targets:
+            self.stop_one(account)
+        return {"ok": True, "items": self.status()}
+
+    def start_targets(
+        self,
+        accounts: list[str],
+        config_items: list[dict[str, Any]],
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        by_account = {str(x.get("account", "")).strip(): x for x in config_items}
+        started = []
+        missing = []
+        with self._lock:
+            for account in [str(a).strip() for a in accounts if str(a).strip()]:
+                item = by_account.get(account)
+                if not item:
+                    missing.append(account)
+                    continue
+                name = self._start_one_locked(item, force=force)
+                if name:
+                    started.append(name)
+        if missing:
+            return {"ok": False, "error": f"小号配置不存在：{', '.join(missing)}", "missing": missing}
+        return {"ok": True, "started": started, "items": self.status()}
+
+    def wait_targets_online(
+        self,
+        accounts: list[str],
+        timeout_s: float,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        targets = [str(a).strip() for a in accounts if str(a).strip()]
+        deadline = time.time() + max(1.0, timeout_s)
+        pending = list(targets)
+        while time.time() < deadline:
+            if stop_event and stop_event.is_set():
+                return {"ok": False, "stopped": True, "error": "已停止"}
+            pending = []
+            with self._lock:
+                for account in targets:
+                    runtime = self._sessions.get(account)
+                    if not runtime or runtime.status != "online" or not runtime.sock:
+                        pending.append(account)
+            if not pending:
+                return {"ok": True}
+            if stop_event:
+                stop_event.wait(0.5)
+            else:
+                time.sleep(0.5)
+        return {"ok": False, "error": f"小号上线超时：{', '.join(pending)}", "pending": pending}
+
+    def wait_targets_joined(
+        self,
+        accounts: list[str],
+        timeout_s: float,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        targets = [str(a).strip() for a in accounts if str(a).strip()]
+        deadline = time.time() + max(1.0, timeout_s)
+        missing = list(targets)
+        while time.time() < deadline:
+            if stop_event and stop_event.is_set():
+                return {"ok": False, "stopped": True, "error": "已停止"}
+            missing = []
+            with self._lock:
+                for account in targets:
+                    runtime = self._sessions.get(account)
+                    if not runtime or not runtime.team_joined:
+                        missing.append(account)
+            if not missing:
+                return {"ok": True}
+            if stop_event:
+                stop_event.wait(0.5)
+            else:
+                time.sleep(0.5)
+        details = []
+        with self._lock:
+            for account in missing:
+                runtime = self._sessions.get(account)
+                if runtime:
+                    details.append(f"{account}({runtime.role_name or runtime.role_id or '未选角'})")
+                else:
+                    details.append(account)
+        return {"ok": False, "error": f"小号入队超时：{', '.join(details)}", "missing": missing}
+
+    def reset_team_joined_for_targets(self, accounts: list[str]) -> None:
+        targets = {str(a).strip() for a in accounts if str(a).strip()}
+        with self._lock:
+            for runtime in self._sessions.values():
+                if runtime.account in targets:
+                    runtime.team_joined = False
 
     def start_first_two(self, accounts: list[dict[str, Any]]) -> dict[str, Any]:
         selected = accounts[:2]
@@ -171,13 +345,18 @@ class SmallAccountManager:
             return {"ok": False, "error": "小号账号或密码为空"}
         return {"ok": True, "started": [account], "items": self.status()}
 
-    def _start_one_locked(self, item: dict[str, Any]) -> str:
+    def _start_one_locked(self, item: dict[str, Any], *, force: bool = False) -> str:
         account = str(item.get("account", "")).strip()
         password = str(item.get("password", "")).strip()
         if not account or not password:
             return ""
         existing = self._sessions.get(account)
-        if existing and existing.expected_online and existing.status in ("online", "logging_in", "reconnecting"):
+        if (
+            existing
+            and not force
+            and existing.expected_online
+            and existing.status in ("online", "logging_in", "reconnecting")
+        ):
             return account
         if existing:
             existing.expected_online = False
@@ -399,6 +578,9 @@ class SmallAccountManager:
         packet_hex = frame.hex()
         fingerprint = packet_hex[8:20] if len(packet_hex) >= 20 else ""
         if fingerprint in _IGNORED_FINGERPRINTS:
+            return
+        if fingerprint in _TEAM_STATE_FINGERPRINTS:
+            self.mark_joined_from_packet(packet_hex, fingerprint)
             return
         if fingerprint in _BATTLE_LIST_FINGERPRINTS:
             # 小号不再根据自己的下行包主动攻击；由主号 battle 流程在主号 f703 发送成功后调度。

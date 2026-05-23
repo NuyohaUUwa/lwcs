@@ -301,6 +301,12 @@ def _perform_backend_reconnect():
             banned_until_ts=0.0,
         )
         _emit_control_log("后端自动重连成功", level="ok", scope="reconnect")
+        try:
+            from game_test.backend.application import ladder_service
+
+            ladder_service.on_main_reconnect_resume()
+        except Exception as ladder_err:
+            print(f"[flow] 一键挑战重连恢复失败: {ladder_err}")
         if get_battle_state_snapshot().get("loop_running"):
             schedule_loop_restart_after_reconnect(0.3)
             _emit_control_log("后端将恢复循环战斗", level="ok", scope="battle")
@@ -440,7 +446,8 @@ def _handle_banned_role_packet():
 
 
 def _maybe_emit_team_packet_event(packet_hex: str, fingerprint: str) -> bool:
-    if fingerprint not in ("e8030100fa07", "e8030100fd07"):
+    fp = str(fingerprint or "").strip().lower()
+    if fp not in ("e8030100fa07", "e8030100fd07", "e8030100fc07"):
         return False
     session = get_session()
     text = extract_utf8_segments(packet_hex)
@@ -450,19 +457,21 @@ def _maybe_emit_team_packet_event(packet_hex: str, fingerprint: str) -> bool:
             {"event": "invite_sent", "message": "成功发送组队消息，等待对方回应", "raw_text": text},
         )
         return True
-    if "加入队伍" in text:
+    if fp in ("e8030100fd07", "e8030100fc07"):
         joined = []
         try:
             from game_test.backend.domain.ladder.small_runtime import small_account_manager
 
-            joined = small_account_manager.mark_joined_from_text(text)
+            joined = small_account_manager.mark_joined_from_packet(packet_hex, fp)
         except Exception as exc:
             print(f"[flow] 标记小号入队失败: {exc}")
-        session._notify_sse(
-            "ladder_team",
-            {"event": "joined", "message": "加入队伍", "raw_text": text, "joined": joined},
-        )
-        return True
+        if joined or (fp == "e8030100fd07" and "加入队伍" in text):
+            msg = "加入队伍" if "加入队伍" in text else "队伍状态更新"
+            session._notify_sse(
+                "ladder_team",
+                {"event": "joined", "message": msg, "raw_text": text, "joined": joined},
+            )
+            return True
     return False
 
 
@@ -478,13 +487,23 @@ def _default_disconnect_handler(error: Exception):
     if not session.connected and session.connection_status == "disconnected":
         return
     print(f"[flow] 游戏连接断开: {error}")
+    ladder_service = None
+    ladder_was_running = False
     try:
-        from game_test.backend.domain.ladder.small_runtime import small_account_manager
+        from game_test.backend.application import ladder_service as imported_ladder_service
 
-        small_account_manager.stop_all()
-        _emit_control_log("主号断线，已断开所有托管小号", level="warn", scope="ladder")
+        ladder_service = imported_ladder_service
+        ladder_was_running = ladder_service.is_ladder_auto_running()
+        if ladder_was_running:
+            ladder_service.on_main_disconnect_during_ladder()
+            _emit_control_log("主号断线，一键挑战已暂停并等待后端重连", level="warn", scope="ladder")
+        else:
+            from game_test.backend.domain.ladder.small_runtime import small_account_manager
+
+            small_account_manager.stop_all()
+            _emit_control_log("主号断线，已断开所有托管小号", level="warn", scope="ladder")
     except Exception as small_err:
-        print(f"[flow] 停止小号失败: {small_err}")
+        print(f"[flow] 天梯/小号断线处理失败: {small_err}")
     preserve_loop = bool(session.battle_loop_running)
     reset_battle_state(preserve_loop=preserve_loop)
     with session._lock:
@@ -501,6 +520,8 @@ def _default_disconnect_handler(error: Exception):
     session.notify_status_change()
     if session.auto_reconnect_enabled and _schedule_reconnect(str(error), immediate=True):
         _emit_control_log(f"连接断开：{error}；后端将自动恢复", level="warn", scope="reconnect")
+    elif ladder_was_running and ladder_service is not None:
+        ladder_service.abort_ladder_auto("主号断线且未开启自动重连，一键挑战已停止")
     session.notify_gold_update()
 
 

@@ -362,6 +362,32 @@
   .battle-dropdown > summary::after { content: '展开'; color: var(--text2); font-size: 11px; }
   .battle-dropdown[open] > summary::after { content: '收起'; }
   .battle-dropdown-body { padding: 0 10px 10px; }
+  .small-account-list-collapse {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(0,0,0,0.08);
+  }
+  .small-account-list-collapse > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--text2);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .small-account-list-collapse > summary::-webkit-details-marker { display: none; }
+  .small-account-list-collapse > summary::after { content: '展开'; color: var(--text2); font-size: 11px; }
+  .small-account-list-collapse[open] > summary::after { content: '收起'; }
+  .small-account-list-body { padding: 0 10px 10px; }
+  .small-account-item {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px;
+    margin-bottom: 6px;
+  }
+  .small-account-item:last-child { margin-bottom: 0; }
 
   @media (max-width: 900px) {
     #layout { grid-template-columns: 1fr; }
@@ -494,7 +520,7 @@
         <button type="button" id="btn-star-stone-loop" class="btn btn-primary btn-sm" data-backpack-single-only="1" onclick="toggleStarStoneLoop()">获取升星石</button>
         <button type="button" class="btn btn-ghost btn-sm" onclick="refreshBackpack()">刷新</button>
         <span class="text-muted text-sm" id="backpack-count"></span>
-        <span class="text-muted text-sm">Ctrl/⌘+点击多选</span>
+        <span class="text-muted text-sm">多选</span>
       </div>
       <div id="backpack-grid"><div class="text-muted text-sm">背包为空或尚未进入游戏</div></div>
         <details class="battle-dropdown mt-8">
@@ -634,7 +660,10 @@
           <button class="btn btn-ghost btn-sm" onclick="clearSmallAccountForm()">清空</button>
           <button class="btn btn-ghost btn-sm" onclick="loadSmallAccounts()">刷新列表</button>
         </div>
-        <div id="small-account-list" class="mt-8 ladder-empty">暂无小号</div>
+        <details id="small-account-list-wrap" class="small-account-list-collapse mt-8">
+          <summary id="small-account-list-summary">小号列表（0）</summary>
+          <div id="small-account-list" class="small-account-list-body ladder-empty">暂无小号</div>
+        </details>
       </div>
 
       <div class="battle-box">
