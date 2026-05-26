@@ -15,7 +15,7 @@ from .paths import (
     LIAOGUO_PAIRS_FILE,
     MONSTERS_FILE,
     QUICK_LOGINS_FILE,
-    SCHEDULED_TASKS_FILE,
+    SCHEDULED_TASK_SETTINGS_FILE,
     SMALL_ACCOUNTS_FILE,
 )
 
@@ -439,21 +439,21 @@ def delete_liaoguo_pair(item_id: str):
     return {"ok": True, "items": new_items}
 
 
-DEFAULT_SCHEDULED_TASKS_CONFIG = {
-    "daily_checkin": {"enabled": False, "times": [], "run_on_login": False},
-    "transport_supply": {"enabled": False, "times": [], "auto_use_gold_ticket": False},
-    "world_boss": {"enabled": False, "times": []},
-    "liaoguo": {"enabled": False, "time": "", "pair_ids": []},
+DEFAULT_SCHEDULED_TASK_SETTINGS = {
+    "daily_checkin": {"enabled": False, "run_on_login": False},
+    "transport_supply": {"enabled": False, "auto_use_gold_ticket": False},
+    "world_boss": {"enabled": False},
+    "liaoguo": {"enabled": False},
 }
 
 
-def load_scheduled_tasks_config():
-    data = _read_json_file(SCHEDULED_TASKS_FILE, {})
+def load_scheduled_task_settings():
+    data = _read_json_file(SCHEDULED_TASK_SETTINGS_FILE, {})
     return data if isinstance(data, dict) else {}
 
 
-def save_scheduled_tasks_config(config: dict):
-    _write_json_file(SCHEDULED_TASKS_FILE, config)
+def save_scheduled_task_settings(settings: dict):
+    _write_json_file(SCHEDULED_TASK_SETTINGS_FILE, settings)
 
 
 __all__ = [
@@ -478,7 +478,7 @@ __all__ = [
     "save_liaoguo_pairs",
     "upsert_liaoguo_pair",
     "delete_liaoguo_pair",
-    "DEFAULT_SCHEDULED_TASKS_CONFIG",
-    "load_scheduled_tasks_config",
-    "save_scheduled_tasks_config",
+    "DEFAULT_SCHEDULED_TASK_SETTINGS",
+    "load_scheduled_task_settings",
+    "save_scheduled_task_settings",
 ]

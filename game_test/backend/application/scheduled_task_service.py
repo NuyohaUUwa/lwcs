@@ -12,10 +12,10 @@ from game_test.backend.domain.combat.battle import (
     stop_battle_loop,
 )
 from game_test.backend.infrastructure.data_manager import (
-    DEFAULT_SCHEDULED_TASKS_CONFIG,
+    DEFAULT_SCHEDULED_TASK_SETTINGS,
     load_liaoguo_pairs,
-    load_scheduled_tasks_config,
-    save_scheduled_tasks_config,
+    load_scheduled_task_settings,
+    save_scheduled_task_settings,
 )
 from game_test.backend.runtime import get_session
 
@@ -33,100 +33,88 @@ _lock = threading.Lock()
 _last_triggered: set[str] = set()
 _active_tasks: dict[str, dict[str, Any]] = {}
 _last_checked_minute = ""
-_last_config_error_log_ts = 0.0
+
+DEFAULT_SCHEDULE_TIMES = {
+    "daily_checkin": ["19:00"],
+    "transport_supply": ["19:30"],
+    "world_boss": ["09:59", "21:59"],
+    "liaoguo": "19:45",
+}
 
 
 def _emit_schedule_log(message: str, *, level: str = "info") -> None:
     get_session()._notify_sse("control_log", {"scope": "scheduled_tasks", "level": level, "message": message})
 
 
-def _default_config() -> dict[str, Any]:
+def _default_settings() -> dict[str, Any]:
     return {
-        k: dict(v) for k, v in DEFAULT_SCHEDULED_TASKS_CONFIG.items()
+        k: dict(v) for k, v in DEFAULT_SCHEDULED_TASK_SETTINGS.items()
     }
 
 
-def _valid_time(value: str) -> bool:
-    if not isinstance(value, str) or len(value) != 5 or value[2] != ":":
-        return False
-    hh, mm = value[:2], value[3:]
-    if not (hh.isdigit() and mm.isdigit()):
-        return False
-    return 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59
-
-
-def _normalize_times(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        raise ValueError("times 必须是数组")
-    out: list[str] = []
+def _liaoguo_pair_ids() -> list[str]:
+    ids: list[str] = []
     seen: set[str] = set()
-    for item in value:
-        t = str(item or "").strip()
-        if not _valid_time(t):
-            raise ValueError(f"非法时间：{t}")
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    out.sort()
-    return out
+    for pair in load_liaoguo_pairs():
+        pid = str(pair.get("id") or pair.get("taskName") or "").strip()
+        if pid and pid not in seen:
+            seen.add(pid)
+            ids.append(pid)
+    return ids
 
 
-def _normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
-    cfg = _default_config()
+def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
+    settings = _default_settings()
     if not isinstance(raw, dict):
-        return cfg
+        return settings
 
-    for key in ("daily_checkin", "transport_supply", "world_boss"):
+    for key in ("daily_checkin", "transport_supply", "world_boss", "liaoguo"):
         src = raw.get(key) if isinstance(raw.get(key), dict) else {}
-        cfg[key]["enabled"] = bool(src.get("enabled", False))
-        cfg[key]["times"] = _normalize_times(src.get("times", []))
+        settings[key]["enabled"] = bool(src.get("enabled", False))
     transport_src = raw.get("transport_supply") if isinstance(raw.get("transport_supply"), dict) else {}
-    cfg["transport_supply"]["auto_use_gold_ticket"] = bool(transport_src.get("auto_use_gold_ticket", False))
+    settings["transport_supply"]["auto_use_gold_ticket"] = bool(transport_src.get("auto_use_gold_ticket", False))
     daily_src = raw.get("daily_checkin") if isinstance(raw.get("daily_checkin"), dict) else {}
-    cfg["daily_checkin"]["run_on_login"] = bool(daily_src.get("run_on_login", False))
+    settings["daily_checkin"]["run_on_login"] = bool(daily_src.get("run_on_login", False))
+    return settings
 
-    liaoguo_src = raw.get("liaoguo") if isinstance(raw.get("liaoguo"), dict) else {}
-    cfg["liaoguo"]["enabled"] = bool(liaoguo_src.get("enabled", False))
-    liaoguo_time = str(liaoguo_src.get("time") or "").strip()
-    if liaoguo_time and not _valid_time(liaoguo_time):
-        raise ValueError(f"非法辽国时间：{liaoguo_time}")
-    cfg["liaoguo"]["time"] = liaoguo_time
 
-    pair_ids = liaoguo_src.get("pair_ids", [])
-    if not isinstance(pair_ids, list):
-        raise ValueError("liaoguo.pair_ids 必须是数组")
-    known_ids = {str(p.get("id") or p.get("taskName") or "").strip() for p in load_liaoguo_pairs()}
-    clean_ids: list[str] = []
-    seen_ids: set[str] = set()
-    for item in pair_ids:
-        pid = str(item or "").strip()
-        if not pid:
-            continue
-        if pid not in known_ids:
-            raise ValueError(f"未知辽国层级：{pid}")
-        if pid not in seen_ids:
-            seen_ids.add(pid)
-            clean_ids.append(pid)
-    cfg["liaoguo"]["pair_ids"] = clean_ids
-    return cfg
+def _build_config(settings: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "daily_checkin": {
+            "enabled": bool(settings["daily_checkin"].get("enabled", False)),
+            "times": list(DEFAULT_SCHEDULE_TIMES["daily_checkin"]),
+            "run_on_login": bool(settings["daily_checkin"].get("run_on_login", False)),
+        },
+        "transport_supply": {
+            "enabled": bool(settings["transport_supply"].get("enabled", False)),
+            "times": list(DEFAULT_SCHEDULE_TIMES["transport_supply"]),
+            "auto_use_gold_ticket": bool(settings["transport_supply"].get("auto_use_gold_ticket", False)),
+        },
+        "world_boss": {
+            "enabled": bool(settings["world_boss"].get("enabled", False)),
+            "times": list(DEFAULT_SCHEDULE_TIMES["world_boss"]),
+        },
+        "liaoguo": {
+            "enabled": bool(settings["liaoguo"].get("enabled", False)),
+            "time": str(DEFAULT_SCHEDULE_TIMES["liaoguo"]),
+            "pair_ids": _liaoguo_pair_ids(),
+        },
+    }
+
+
+def _load_config() -> dict[str, Any]:
+    return _build_config(_normalize_settings(load_scheduled_task_settings()))
 
 
 def get_scheduled_tasks_config() -> dict[str, Any]:
-    try:
-        config = _normalize_config(load_scheduled_tasks_config())
-    except ValueError:
-        config = _default_config()
-    return {"ok": True, "config": config}
+    return {"ok": True, "config": _load_config()}
 
 
 def update_scheduled_tasks_config(body: dict[str, Any]) -> dict[str, Any]:
-    try:
-        config = _normalize_config(body)
-    except ValueError as e:
-        return {"ok": False, "error": str(e)}
-    save_scheduled_tasks_config(config)
+    settings = _normalize_settings(body)
+    save_scheduled_task_settings(settings)
     _emit_schedule_log("定时运行配置已保存", level="ok")
-    return {"ok": True, "config": config}
+    return {"ok": True, "config": _build_config(settings)}
 
 
 def get_scheduled_tasks_status() -> dict[str, Any]:
@@ -279,20 +267,14 @@ def _launch(feature: str, scheduled_time: str, target, *args) -> None:
 
 
 def tick_scheduled_tasks(now: float) -> None:
-    global _last_checked_minute, _last_config_error_log_ts
+    global _last_checked_minute
     local = time.localtime(now)
     minute_key = time.strftime("%Y-%m-%d %H:%M", local)
     with _lock:
         if _last_checked_minute == minute_key:
             return
         _last_checked_minute = minute_key
-    try:
-        config = _normalize_config(load_scheduled_tasks_config())
-    except ValueError as e:
-        if now - _last_config_error_log_ts > 60:
-            _last_config_error_log_ts = now
-            _emit_schedule_log(f"定时配置无效：{e}", level="err")
-        return
+    config = _load_config()
     today = time.strftime("%Y-%m-%d", local)
     hhmm = time.strftime("%H:%M", local)
 
@@ -338,10 +320,7 @@ def tick_scheduled_tasks(now: float) -> None:
 
 
 def maybe_run_login_checkin() -> None:
-    try:
-        config = _normalize_config(load_scheduled_tasks_config())
-    except ValueError:
-        return
+    config = _load_config()
     if not bool(config["daily_checkin"].get("run_on_login")):
         return
     res = send_daily_checkin(source="login")

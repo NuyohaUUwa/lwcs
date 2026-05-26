@@ -719,16 +719,16 @@
         <div style="font-size:12px; color:var(--text2); margin-bottom:8px;">定时运行</div>
         <div class="battle-row">
           <label class="text-muted"><input type="checkbox" id="sched-daily-enabled"> 定时签到</label>
-          <input type="text" id="sched-daily-times" placeholder="时间点，如 08:00,12:30" style="max-width:100px;">
+          <input type="text" id="sched-daily-times" readonly placeholder="时间点，如 08:00,12:30" style="max-width:100px;">
           <label class="text-muted"><input type="checkbox" id="sched-transport-enabled"> 运输物资</label>
-          <input type="text" id="sched-transport-times" placeholder="时间点，如 09:00" style="max-width:100px;">
+          <input type="text" id="sched-transport-times" readonly placeholder="时间点，如 09:00" style="max-width:100px;">
           <label class="text-muted"><input type="checkbox" id="sched-world-boss-enabled"> 世界 BOSS</label>
-          <input type="text" id="sched-world-boss-times" placeholder="时间点，如 12:00,20:00" style="max-width:100px;">
+          <input type="text" id="sched-world-boss-times" readonly placeholder="时间点，如 12:00,20:00" style="max-width:100px;">
         </div>
         <div class="battle-row mt-8">
           <label class="text-muted"><input type="checkbox" id="sched-liaoguo-enabled"> 辽国战斗</label>
-          <input type="text" id="sched-liaoguo-time" placeholder="时间点，如 21:00" style="max-width:100px;">
-          <span class="text-muted text-sm">选择层级后按顺序执行：</span>
+          <input type="text" id="sched-liaoguo-time" readonly placeholder="时间点，如 21:00" style="max-width:100px;">
+          <span class="text-muted text-sm">按当前辽国映射顺序执行：</span>
           <span id="sched-liaoguo-pairs" class="text-muted text-sm">暂无辽国映射</span>
         </div>
         <div class="battle-row mt-8">

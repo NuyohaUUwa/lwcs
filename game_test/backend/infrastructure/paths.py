@@ -50,7 +50,7 @@ BUY_ITEMS_FILE = os.path.join(INSTANCE_DATA_DIR, "buy_items.json")
 LIAOGUO_PAIRS_FILE = os.path.join(INSTANCE_DATA_DIR, "liaoguo_pairs.json")
 AUTO_USE_RULES_FILE = os.path.join(INSTANCE_DATA_DIR, "auto_use_rules.json")
 ANNOTATIONS_FILE = os.path.join(INSTANCE_DATA_DIR, "annotations.json")
-SCHEDULED_TASKS_FILE = os.path.join(INSTANCE_DATA_DIR, "scheduled_tasks.json")
+SCHEDULED_TASK_SETTINGS_FILE = os.path.join(INSTANCE_DATA_DIR, "scheduled_task_settings.json")
 PACKET_LOG_DIR = os.path.join(INSTANCE_DATA_DIR, "packet_logs")
 
 
@@ -79,7 +79,7 @@ __all__ = [
     "LIAOGUO_PAIRS_FILE",
     "AUTO_USE_RULES_FILE",
     "ANNOTATIONS_FILE",
-    "SCHEDULED_TASKS_FILE",
+    "SCHEDULED_TASK_SETTINGS_FILE",
     "PACKET_LOG_DIR",
     "ensure_data_directories",
 ]

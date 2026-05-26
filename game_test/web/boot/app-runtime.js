@@ -27,6 +27,12 @@ let liaoguoRunning = false;
 let liaoguoPairs = [];
 let selectedLiaoguoPairKey = '';
 let scheduledTasksConfig = null;
+const DEFAULT_SCHEDULE_TIMES = {
+  daily_checkin: ['19:00'],
+  transport_supply: ['19:30'],
+  world_boss: ['09:59', '21:59'],
+  liaoguo: '19:45',
+};
 let battleMonsters = [];
 let smallAccounts = [];
 let smallStatusItems = [];
@@ -2288,13 +2294,6 @@ function renderLiaoguoPairs() {
   renderScheduledLiaoguoPairs();
 }
 
-function parseScheduleTimesInput(value) {
-  return String(value || '')
-    .split(/[,\uff0c\s]+/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-}
-
 function setInputValue(id, value) {
   const el = document.getElementById(id);
   if (el) el.value = value;
@@ -2312,18 +2311,15 @@ function getCheckboxValue(id) {
 function renderScheduledLiaoguoPairs() {
   const box = document.getElementById('sched-liaoguo-pairs');
   if (!box) return;
-  const selected = new Set(scheduledTasksConfig?.liaoguo?.pair_ids || []);
   if (!liaoguoPairs.length) {
     box.innerHTML = '<span class="text-muted text-sm">暂无辽国映射</span>';
     return;
   }
   box.innerHTML = liaoguoPairs.map((pair) => {
     const key = getLiaoguoPairKey(pair);
-    const checked = selected.has(key) ? ' checked' : '';
-    return `<label style="display:inline-flex; align-items:center; gap:4px; margin-right:10px; margin-bottom:6px;">
-      <input type="checkbox" class="sched-liaoguo-pair" value="${escAttr(key)}"${checked}>
+    return `<span style="display:inline-flex; align-items:center; gap:4px; margin-right:10px; margin-bottom:6px;">
       <span>${escHtml(pair.label || key)} (${escHtml(pair.monsterCode || '')})</span>
-    </label>`;
+    </span>`;
   }).join('');
 }
 
@@ -2334,15 +2330,15 @@ function renderScheduledTasksConfig(config) {
   const worldBoss = scheduledTasksConfig.world_boss || {};
   const liaoguo = scheduledTasksConfig.liaoguo || {};
   setCheckboxValue('sched-daily-enabled', daily.enabled);
-  setInputValue('sched-daily-times', Array.isArray(daily.times) ? daily.times.join(',') : '');
+  setInputValue('sched-daily-times', (Array.isArray(daily.times) ? daily.times : DEFAULT_SCHEDULE_TIMES.daily_checkin).join(','));
   setCheckboxValue('sched-daily-login', daily.run_on_login);
   setCheckboxValue('sched-transport-enabled', transport.enabled);
-  setInputValue('sched-transport-times', Array.isArray(transport.times) ? transport.times.join(',') : '');
+  setInputValue('sched-transport-times', (Array.isArray(transport.times) ? transport.times : DEFAULT_SCHEDULE_TIMES.transport_supply).join(','));
   setCheckboxValue('tool-transport-auto-use-gold-ticket', transport.auto_use_gold_ticket);
   setCheckboxValue('sched-world-boss-enabled', worldBoss.enabled);
-  setInputValue('sched-world-boss-times', Array.isArray(worldBoss.times) ? worldBoss.times.join(',') : '');
+  setInputValue('sched-world-boss-times', (Array.isArray(worldBoss.times) ? worldBoss.times : DEFAULT_SCHEDULE_TIMES.world_boss).join(','));
   setCheckboxValue('sched-liaoguo-enabled', liaoguo.enabled);
-  setInputValue('sched-liaoguo-time', liaoguo.time || '');
+  setInputValue('sched-liaoguo-time', liaoguo.time || DEFAULT_SCHEDULE_TIMES.liaoguo);
   renderScheduledLiaoguoPairs();
 }
 
@@ -2356,28 +2352,20 @@ async function loadScheduledTasksConfig() {
 }
 
 async function saveScheduledTasksConfig() {
-  const pairIds = Array.from(document.querySelectorAll('.sched-liaoguo-pair:checked'))
-    .map((el) => String(el.value || '').trim())
-    .filter(Boolean);
   const body = {
     daily_checkin: {
       enabled: getCheckboxValue('sched-daily-enabled'),
-      times: parseScheduleTimesInput(document.getElementById('sched-daily-times')?.value || ''),
       run_on_login: getCheckboxValue('sched-daily-login'),
     },
     transport_supply: {
       enabled: getCheckboxValue('sched-transport-enabled'),
-      times: parseScheduleTimesInput(document.getElementById('sched-transport-times')?.value || ''),
       auto_use_gold_ticket: getCheckboxValue('tool-transport-auto-use-gold-ticket'),
     },
     world_boss: {
       enabled: getCheckboxValue('sched-world-boss-enabled'),
-      times: parseScheduleTimesInput(document.getElementById('sched-world-boss-times')?.value || ''),
     },
     liaoguo: {
       enabled: getCheckboxValue('sched-liaoguo-enabled'),
-      time: String(document.getElementById('sched-liaoguo-time')?.value || '').trim(),
-      pair_ids: pairIds,
     },
   };
   const res = await api('PUT', '/api/scheduled-tasks/config', body).catch(() => null);
