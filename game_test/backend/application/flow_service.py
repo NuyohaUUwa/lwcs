@@ -47,7 +47,7 @@ def _emit_flow_status() -> None:
 # World Boss
 # =============================================================================
 _WORLD_BOSS_PACKET_HEX = "27000000e8030d00fe0367e7f505100400001500000038900d0002ff5f0d00000000000000000001000000"
-_WORLD_BOSS_INTERVAL_S = 1.5
+_WORLD_BOSS_INTERVAL_S = 2.5
 _WORLD_BOSS_DEAD_FP = "e8030100e607"
 _WORLD_BOSS_DEAD_HEX = "424f5353e5b7b2e8a2abe587bbe6af81efbc81"
 _WORLD_BOSS_DEAD_TEXT = "BOSS已被击毙！"

@@ -7,9 +7,11 @@ from ...application.inventory_service import (
     decompose_item,
     drop_item,
     exchange_wuling,
+    get_auto_decompose_s1_config,
     get_backpack,
     refresh_backpack,
     synthesize_item,
+    update_auto_decompose_s1_config,
     use_item,
 )
 from ..serializers import _json_ok
@@ -27,6 +29,16 @@ def api_backpack():
 @blueprint.route("/backpack/refresh", methods=["POST"])
 def api_backpack_refresh():
     return jsonify(refresh_backpack())
+
+
+@blueprint.route("/backpack/auto-decompose", methods=["GET"])
+def api_backpack_auto_decompose_get():
+    return jsonify(get_auto_decompose_s1_config())
+
+
+@blueprint.route("/backpack/auto-decompose", methods=["PUT"])
+def api_backpack_auto_decompose_put():
+    return _json_ok(update_auto_decompose_s1_config(get_json_body()))
 
 
 @blueprint.route("/item/use", methods=["POST"])

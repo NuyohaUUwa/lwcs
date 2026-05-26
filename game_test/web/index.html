@@ -519,8 +519,11 @@
         <button type="button" class="btn btn-ghost btn-sm" data-backpack-single-only="1" onclick="exchangeWuling()">兑换五灵</button>
         <button type="button" id="btn-star-stone-loop" class="btn btn-primary btn-sm" data-backpack-single-only="1" onclick="toggleStarStoneLoop()">获取升星石</button>
         <button type="button" class="btn btn-ghost btn-sm" onclick="refreshBackpack()">刷新</button>
+        <label class="text-muted text-sm" style="display:flex; align-items:center; gap:4px;">
+          <input type="checkbox" id="chk-auto-decompose-s1" onchange="toggleAutoDecomposeS1(this.checked)">
+          自动分解
+        </label>
         <span class="text-muted text-sm" id="backpack-count"></span>
-        <span class="text-muted text-sm">多选</span>
       </div>
       <div id="backpack-grid"><div class="text-muted text-sm">背包为空或尚未进入游戏</div></div>
         <details class="battle-dropdown mt-8">

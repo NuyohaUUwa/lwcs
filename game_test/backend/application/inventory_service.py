@@ -18,6 +18,19 @@ def refresh_backpack() -> dict[str, Any]:
     return {"ok": True, "items": items, "count": len(items), "gold": session.get_gold_snapshot()}
 
 
+def get_auto_decompose_s1_config() -> dict[str, Any]:
+    return {"ok": True, "enabled": bool(get_session().auto_decompose_s1_enabled)}
+
+
+def update_auto_decompose_s1_config(payload: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool(payload.get("enabled", False))
+    session = get_session()
+    with session._lock:
+        session.auto_decompose_s1_enabled = enabled
+    session._notify_sse("status", session.get_status())
+    return {"ok": True, "enabled": enabled}
+
+
 def use_item(payload: dict[str, Any]) -> dict[str, Any]:
     return send_action("item.use", payload)
 

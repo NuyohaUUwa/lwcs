@@ -9,7 +9,7 @@
 
 import binascii
 
-from game_test.core.codec import find_all_positions, slice_game_frame_hex_at
+from game_test.core.codec import extract_utf8_segments, find_all_positions, slice_game_frame_hex_at
 from game_test.backend.runtime import Item, get_session
 from game_test.backend.domain.roles.role_stats import merge_role_stats_from_packet, update_session_stats
 
@@ -18,6 +18,12 @@ _AUTH_BACKPACK_LIST_FP = "e8030100d607"
 
 _GAIN_KEYWORDS = ("得到", "获得")
 _LOSE_KEYWORDS = ("失去", "丢失")
+_S1_GIFT_KEYWORDS = ("s1", "礼包")
+_JOB_PROTECTED_EQUIPMENT = {
+    "侠客": ("侠士战甲", "侠士头盔"),
+    "刺客": ("刺客战甲", "刺客头盔"),
+    "术士": ("术士战甲", "术士头盔"),
+}
 
 
 def _infer_delta_sign_from_text(utf8_text: str | None) -> int | None:
@@ -42,6 +48,103 @@ def _apply_backpack_items_delta(items: list[Item], *, delta_sign: int) -> None:
         session.notify_backpack_update()
 
 
+def is_s1_gift_use_text(text: str | None) -> bool:
+    compact = str(text or "").replace("\r", "").replace("\n", "").strip().lower()
+    used_idx = compact.find("已使用")
+    if used_idx >= 0:
+        compact = compact[used_idx + len("已使用") :]
+        stops = [idx for marker in ("获得", "得到") if (idx := compact.find(marker)) >= 0]
+        if stops:
+            compact = compact[: min(stops)]
+    return all(k in compact for k in _S1_GIFT_KEYWORDS)
+
+
+def should_auto_decompose_item(item: Item, role_job: str | None) -> bool:
+    if not item.can_disassemble:
+        return False
+    name = str(item.name or "")
+    if "黄金" in name:
+        return False
+    protected = _JOB_PROTECTED_EQUIPMENT.get(str(role_job or ""), ())
+    return not any(protected_name in name for protected_name in protected)
+
+
+def _auto_decompose_candidates(items: list[Item], role_job: str | None) -> list[Item]:
+    by_id: dict[str, Item] = {}
+    for item in items:
+        if should_auto_decompose_item(item, role_job):
+            by_id[item.item_id] = item
+    return list(by_id.values())
+
+
+def _extract_embedded_obtained_items(packet_hex: str) -> list[Item]:
+    packet_hex_l = packet_hex.lower()
+    marker = "e8030100ed07"
+    start = 0
+    out: list[Item] = []
+    while True:
+        idx = packet_hex_l.find(marker, start)
+        if idx < 8:
+            break
+        frame_start = idx - 8
+        sub_packet = slice_game_frame_hex_at(packet_hex, frame_start)
+        if sub_packet is not None:
+            out.extend(_collect_items(sub_packet, "cd00"))
+        start = idx + len(marker)
+    return out
+
+
+def _maybe_auto_decompose_s1_gift_items(
+    packet_hex: str,
+    *,
+    utf8_text: str | None,
+    root_items: list[Item],
+    delta_sign: int,
+) -> None:
+    if delta_sign <= 0:
+        return
+    session = get_session()
+    if not session.auto_decompose_s1_enabled:
+        return
+    trigger_text = utf8_text or extract_utf8_segments(packet_hex)
+    if not is_s1_gift_use_text(trigger_text):
+        return
+    embedded_items = _extract_embedded_obtained_items(packet_hex)
+    if not root_items and not embedded_items:
+        with session._lock:
+            session.auto_decompose_s1_pending = True
+        return
+    role_job = session.current_role.role_job if session.current_role else ""
+    candidates = _auto_decompose_candidates(
+        list(root_items) + embedded_items,
+        role_job,
+    )
+    _send_auto_decompose_actions(candidates)
+
+
+def _consume_pending_auto_decompose_s1_items(items: list[Item]) -> None:
+    session = get_session()
+    with session._lock:
+        pending = bool(session.auto_decompose_s1_pending)
+        if pending:
+            session.auto_decompose_s1_pending = False
+    if not pending:
+        return
+    role_job = session.current_role.role_job if session.current_role else ""
+    _send_auto_decompose_actions(_auto_decompose_candidates(items, role_job))
+
+
+def _send_auto_decompose_actions(items: list[Item]) -> None:
+    if not items:
+        return
+    from game_test.backend.runtime.actions import send_action
+
+    for item in items:
+        res = send_action("item.decompose", {"item_id": item.item_id})
+        if not res.get("ok"):
+            print(f"[backpack] 自动分解失败: {item.name}({item.item_id}) - {res.get('error', '未知错误')}")
+
+
 def dispatch_backpack_packet(packet_hex: str, utf8_text: str | None = None) -> bool:
     """
     尝试对下行报文进行背包相关解析。
@@ -61,7 +164,7 @@ def dispatch_backpack_packet(packet_hex: str, utf8_text: str | None = None) -> b
         _parse_item_bought(packet_hex, delta_sign=delta_sign)
         return True
     if "ec07" in fingerprint:
-        _parse_backpack_change(packet_hex, delta_sign=delta_sign)
+        _parse_backpack_change(packet_hex, delta_sign=delta_sign, utf8_text=utf8_text)
         return True
     if "ed07" in fingerprint:
         _parse_item_obtained(packet_hex, delta_sign=delta_sign)
@@ -138,7 +241,7 @@ def _parse_backpack_list_authoritative(packet_hex: str):
 # ------------------------------------------------------------------ #
 
 
-def _parse_backpack_change(packet_hex: str, *, delta_sign: int):
+def _parse_backpack_change(packet_hex: str, *, delta_sign: int, utf8_text: str | None = None):
     """ec07：非 d607，仅做数量增减；内嵌 ed07 子包同样按 delta_sign 执行。"""
     items = _items_for_obtain_and_bought(packet_hex)
     session = get_session()
@@ -147,11 +250,20 @@ def _parse_backpack_change(packet_hex: str, *, delta_sign: int):
         changed |= _parse_embedded_obtained_packets(packet_hex, delta_sign=delta_sign)
     if changed:
         session.notify_backpack_update()
+    _maybe_auto_decompose_s1_gift_items(
+        packet_hex,
+        utf8_text=utf8_text,
+        root_items=[it for it in items if it.can_disassemble],
+        delta_sign=delta_sign,
+    )
 
 
 def _parse_item_obtained(packet_hex: str, *, delta_sign: int):
     """ed07：非 d607，仅做数量增减（根据文本推断 delta_sign）。"""
-    _apply_backpack_items_delta(_items_for_obtain_and_bought(packet_hex), delta_sign=delta_sign)
+    items = _items_for_obtain_and_bought(packet_hex)
+    _apply_backpack_items_delta(items, delta_sign=delta_sign)
+    if delta_sign > 0:
+        _consume_pending_auto_decompose_s1_items(items)
 
 
 def _parse_item_bought(packet_hex: str, *, delta_sign: int):

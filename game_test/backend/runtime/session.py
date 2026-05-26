@@ -58,6 +58,8 @@ class GameSession:
         self.gold_reserve_copper: int = 0
         self.gold_safe_copper: int = 0
         self.gold_backpack_copper: int = 0
+        self.auto_decompose_s1_enabled: bool = False
+        self.auto_decompose_s1_pending: bool = False
         # 固定使用 config 默认 NPC；不再从包解析/外部接口动态切换。
         self.current_map_npc_id_hex: str = DEFAULT_MAP_NPC_ID_HEX
         self.current_map_npc_utf8_text: str = DEFAULT_MAP_NPC_UTF8_TEXT
@@ -395,6 +397,7 @@ class GameSession:
             "server_name": self.server_name,
             "role": self.current_role.to_dict() if self.current_role else None,
             "backpack_count": len(self.backpack_items),
+            "auto_decompose_s1_enabled": self.auto_decompose_s1_enabled,
             "last_recv_age": last_recv_age,
             "default_battle_loop_delay_ms": DEFAULT_BATTLE_LOOP_DELAY_MS,
             "current_map_npc": current_map_npc,
@@ -446,6 +449,8 @@ class GameSession:
             self.gold_reserve_copper = 0
             self.gold_safe_copper = 0
             self.gold_backpack_copper = 0
+            self.auto_decompose_s1_enabled = False
+            self.auto_decompose_s1_pending = False
             self.current_map_npc_id_hex = DEFAULT_MAP_NPC_ID_HEX
             self.current_map_npc_utf8_text = DEFAULT_MAP_NPC_UTF8_TEXT
             self.last_recv_ts = 0.0

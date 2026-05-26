@@ -18,6 +18,7 @@ let unifiedLoginLastTriggerTs = 0;
 let lastConnectInfo = { account: '', password: '', loginServer: '', serverIp: '', serverPort: 0, serverName: '', roleId: '' };
 let buyItemFavorites = [];
 let selectedBuyItemCode = '';
+let autoDecomposeS1Enabled = false;
 let starStoneLoopRunning = false;
 let synthesisBatchRunning = false;
 let transportSupplyRunning = false;
@@ -279,6 +280,9 @@ function updateStatus(data) {
   isConnected = data.connected;
   if (data.control_state) setControlState(data.control_state);
   if (data.battle_state) updateBattleState(data.battle_state);
+  if (typeof data.auto_decompose_s1_enabled === 'boolean') {
+    setAutoDecomposeS1Ui(data.auto_decompose_s1_enabled);
+  }
 
   if (!data.connected) {
     backpackItemsCache = [];
@@ -959,6 +963,35 @@ function onSynthesisResult(data) {
 async function exchangeWuling() {
   const res = await api('POST', '/api/item/exchange-wuling');
   showMsg('backpack-msg', res.ok ? withValidationWarning('兑换五灵请求已入队', res) : res.error, res.ok ? 'ok' : 'err');
+}
+
+function setAutoDecomposeS1Ui(enabled) {
+  autoDecomposeS1Enabled = !!enabled;
+  const chk = document.getElementById('chk-auto-decompose-s1');
+  if (chk && chk.checked !== autoDecomposeS1Enabled) chk.checked = autoDecomposeS1Enabled;
+}
+
+async function refreshAutoDecomposeS1Status(silent = true) {
+  const res = await api('GET', '/api/backpack/auto-decompose').catch(() => null);
+  if (!res || !res.ok) {
+    if (!silent) showMsg('backpack-msg', res?.error || '读取自动分解状态失败', 'err');
+    return;
+  }
+  setAutoDecomposeS1Ui(!!res.enabled);
+}
+
+async function toggleAutoDecomposeS1(enabled) {
+  const previous = autoDecomposeS1Enabled;
+  const next = !!enabled;
+  setAutoDecomposeS1Ui(next);
+  const res = await api('PUT', '/api/backpack/auto-decompose', { enabled: next }).catch(() => null);
+  if (!res || !res.ok) {
+    setAutoDecomposeS1Ui(previous);
+    showMsg('backpack-msg', res?.error || '自动分解设置失败', 'err');
+    return;
+  }
+  setAutoDecomposeS1Ui(!!res.enabled);
+  showMsg('backpack-msg', res.enabled ? '自动分解已启用' : '自动分解已关闭', 'ok');
 }
 
 async function loadBuyItems() {
@@ -3142,6 +3175,7 @@ function toggleCollapseMode() {
   ensureSmallStatusPolling();
   loadBuyItems();
   loadGold();
+  await refreshAutoDecomposeS1Status(true);
   await loadLiaoguoPairs();
   await loadScheduledTasksConfig();
   const liaoguoSel = document.getElementById('liaoguo-pair-select');
