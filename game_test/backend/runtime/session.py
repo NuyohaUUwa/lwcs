@@ -90,8 +90,6 @@ class GameSession:
         self.auto_use_pending_actions: list[dict[str, Any]] = []
         self.battle_preflight_teleport_used_once: bool = False
         self.battle_f703_timeout_recover_count: int = 0
-        self.battle_f603_start_timeout_recover_count: int = 0
-        self.battle_f603_login_protect_retry_count: int = 0
 
         # ---- 后端控制平面 ----
         self.auto_reconnect_enabled: bool = False
@@ -323,8 +321,6 @@ class GameSession:
                 "total_exp": self.battle_total_exp,
                 "total_gold_copper": self.battle_total_gold_copper,
                 "f703_timeout_recover_count": self.battle_f703_timeout_recover_count,
-                "f603_start_timeout_recover_count": self.battle_f603_start_timeout_recover_count,
-                "f603_login_protect_retry_count": self.battle_f603_login_protect_retry_count,
             },
         )
 
@@ -419,8 +415,6 @@ class GameSession:
                 "total_exp": self.battle_total_exp,
                 "total_gold_copper": self.battle_total_gold_copper,
                 "f703_timeout_recover_count": self.battle_f703_timeout_recover_count,
-                "f603_start_timeout_recover_count": self.battle_f603_start_timeout_recover_count,
-                "f603_login_protect_retry_count": self.battle_f603_login_protect_retry_count,
             },
         }
 
@@ -474,8 +468,6 @@ class GameSession:
             self.auto_use_pending_actions = []
             self.battle_preflight_teleport_used_once = False
             self.battle_f703_timeout_recover_count = 0
-            self.battle_f603_start_timeout_recover_count = 0
-            self.battle_f603_login_protect_retry_count = 0
             self.reconnect_state = "idle"
             self.reconnect_reason = ""
             self.reconnect_attempts = 0

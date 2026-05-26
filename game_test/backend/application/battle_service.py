@@ -36,12 +36,8 @@ def upsert_monster(*, name: str, code: str) -> dict[str, Any]:
     clean_code = str(code or "").strip().lower()
     if not clean_name:
         return {"ok": False, "error": "name 不能为空"}
-    if len(clean_code) != 4:
-        return {"ok": False, "error": "code 必须是 4 位 hex"}
-    try:
-        _ = int(clean_code, 16)
-    except ValueError:
-        return {"ok": False, "error": "code 不是合法 hex"}
+    if not clean_code:
+        return {"ok": False, "error": "code 不能为空"}
 
     monsters = get_monsters()
     exists = next((monster for monster in monsters if monster.get("code") == clean_code), None)

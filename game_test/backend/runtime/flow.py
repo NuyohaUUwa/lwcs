@@ -16,14 +16,13 @@ from game_test.backend.domain.auth.login import build_login_packet, parse_login_
 from game_test.backend.domain.combat.battle import (
     BATTLE_STATE_COOLDOWN,
     BATTLE_STATE_WAITING_DE07,
-    MAX_F603_START_TIMEOUT_RECOVER,
     MAX_F703_TIMEOUT_RECOVER,
     clear_battle_wait_deadline,
     get_battle_state_snapshot,
     get_wait_timeout_reason,
     handle_battle_server_packet,
     is_battle_wait_timed_out,
-    recover_battle_wait_timeout_resend_f603,
+    recover_de07_exception_resend_f603,
     recover_battle_wait_timeout_with_f703,
     reset_battle_state,
     schedule_loop_restart_after_reconnect,
@@ -343,17 +342,16 @@ def _control_worker_tick(now: float) -> None:
         st = str(battle_state.get("state") or "")
         clear_battle_wait_deadline()
         if st == BATTLE_STATE_WAITING_DE07:
-            res = recover_battle_wait_timeout_resend_f603()
+            res = recover_de07_exception_resend_f603(reason)
             if res.get("ok"):
-                n = res.get("recover_count", 0)
                 _emit_control_log(
-                    f"{reason}，已重发 f603（第 {n}/{MAX_F603_START_TIMEOUT_RECOVER} 次）",
+                    f"de07异常：{reason}，已重发 f603",
                     level="warn",
                     scope="battle",
                 )
             else:
                 _emit_control_log(
-                    f"{reason}，f603 超时重发未继续：{res.get('error', '')}",
+                    f"de07异常：{reason}，重发 f603 失败：{res.get('error', '')}",
                     level="warn",
                     scope="battle",
                 )

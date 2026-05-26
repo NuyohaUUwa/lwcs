@@ -1588,6 +1588,13 @@ function appendBattlePacketLine(record) {
 async function onBattleResponse(data) {
   updateBattleState(data?.battle_state || {});
   if (battleLogMode === 'detail') appendBattleLog(data, 'response');
+  const monsterName = String(data?.monster_name || '').trim();
+  const monsterCount = Number(data?.monster_count || 0);
+  if (data?.de07_status === 'normal' && monsterName && monsterCount > 0) {
+    const n = Number(data?.battle_state?.total_count || battleState.total_count || 0) + 1;
+    const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    appendBattleLog({ raw_text: `【${t}】 第${n}次 遭遇：${monsterName} x${monsterCount}` }, 'response');
+  }
   appendLadderBattleLogFromEvent('response', data);
 }
 
