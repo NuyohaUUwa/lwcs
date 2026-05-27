@@ -303,6 +303,16 @@ def run_pending_auto_use_actions(trigger: str = "") -> Dict[str, Any]:
     return {"ok": True, "trigger": trigger, "actions": actions}
 
 
+def prepare_and_run_auto_use_actions(trigger: str = "") -> Dict[str, Any]:
+    prepared = prepare_auto_use_actions(trigger)
+    if not prepared.get("ok"):
+        return {"ok": False, "trigger": trigger, "prepared": prepared, "executed": {"actions": []}}
+    executed = run_pending_auto_use_actions(trigger)
+    if not executed.get("ok"):
+        return {"ok": False, "trigger": trigger, "prepared": prepared, "executed": executed}
+    return {"ok": True, "trigger": trigger, "prepared": prepared, "executed": executed}
+
+
 def _decode_utf8_text(packet_hex: str) -> str:
     try:
         raw = bytes.fromhex(packet_hex[16:] if len(packet_hex) > 16 else packet_hex)
@@ -1280,10 +1290,10 @@ def _handle_df07_packet(packet_hex: str) -> Dict[str, Any]:
         session = get_session()
         with session._lock:
             session.battle_f703_timeout_recover_count = 0
-        prepared_auto_use = prepare_auto_use_actions("battle_end:df07")
+        auto_use = prepare_and_run_auto_use_actions("battle_end:df07")
         _finish_round_for_next_loop(payload, last_action="df07", last_response_ts=now)
         _emit_battle_state_with_payload("battle_end", payload)
-        return {"ok": True, "payload": payload, "prepared_auto_use": prepared_auto_use}
+        return {"ok": True, "payload": payload, "auto_use": auto_use}
 
     if df07_kind == "inner_force_short":
         _set_battle_state(
@@ -1333,11 +1343,11 @@ def _handle_e207_packet(packet_hex: str) -> Dict[str, Any]:
         _emit_battle_state_with_payload("battle_settlement_e207", payload)
         return {"ok": True, "payload": payload}
     else:
-        prepared_auto_use = prepare_auto_use_actions("battle_end:e207")
+        auto_use = prepare_and_run_auto_use_actions("battle_end:e207")
         _finish_round_for_next_loop(payload, last_action="e207", last_response_ts=time.time())
 
     _emit_battle_state_with_payload("battle_settlement_e207", payload)
-    return {"ok": True, "payload": payload, "prepared_auto_use": prepared_auto_use}
+    return {"ok": True, "payload": payload, "auto_use": auto_use}
 
 
 def _finish_round_for_next_loop(payload: Dict[str, Any], *, last_action: str, last_response_ts: float) -> Dict[str, Any]:

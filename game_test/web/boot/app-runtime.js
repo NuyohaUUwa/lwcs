@@ -1798,10 +1798,12 @@ function onBattleLogModeChange() {
 
 function onAutoUseEvent(data) {
   if (!data || !Array.isArray(data.actions) || !data.actions.length) return;
-  const lines = data.actions.map(a => {
+  const phase = String(data.phase || '');
+  const lines = data.actions.filter((a) => phase === 'executed' || !a.ok).map(a => {
     if (a.ok) return `[自动使用] ${a.item_name || a.item_id} 已使用`;
     return `[自动使用] ${a.item_name || a.item_id} 失败: ${a.reason || a.error || '未知错误'}`;
   });
+  if (!lines.length) return;
   appendBattleLog({ raw_text: lines.join(' / ') }, 'response');
 }
 
