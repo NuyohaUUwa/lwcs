@@ -41,6 +41,8 @@ let ladderBattleLogActive = false;
 let ladderAutoState = { running: false, start_floor: 1, end_floor: 1, current_floor: 0, completed_floor: 0, last_error: '' };
 let selectedMonsterCode = '';
 let battleLogMode = 'simple'; // simple | detail
+let battleEncounterRoundText = '-';
+let battleEncounterMonsterText = '-';
 let autoUseRules = [];
 let controlState = { auto_reconnect_enabled: false, reconnect_state: 'idle', reconnect_attempts: 0, reconnect_max_attempts: 0, reconnect_last_error: '', reconnect_next_retry_in: null, reconnect_banned_wait_in: null };
 /** 与后端 config.DEFAULT_BATTLE_LOOP_DELAY_MS 同步，由 /api/status 的 default_battle_loop_delay_ms 写入 */
@@ -1499,6 +1501,34 @@ function updateCurrentMonster() {
   document.getElementById('battle-current-monster').textContent = cur ? `${cur.name} (${cur.code})` : (activeCode || '未选择');
 }
 
+function setBattleEncounterMonster(text) {
+  battleEncounterMonsterText = String(text || '').trim() || '-';
+  const el = document.getElementById('battle-encounter-monster');
+  if (el) el.textContent = battleEncounterMonsterText;
+}
+
+function setBattleEncounterRound(text) {
+  battleEncounterRoundText = String(text || '').trim() || '-';
+  const el = document.getElementById('battle-encounter-round');
+  if (el) el.textContent = battleEncounterRoundText;
+}
+
+function resetBattleEncounterMonster() {
+  setBattleEncounterMonster('-');
+}
+
+function updateBattleEncounterMonster(data) {
+  const monsterName = String(data?.monster_name || '').trim();
+  const monsterCount = Number(data?.monster_count || 0);
+  if (data?.de07_status === 'normal' && monsterName && monsterCount > 0) {
+    const round = Number(data?.battle_state?.total_count || battleState.total_count || 0) + 1;
+    setBattleEncounterRound(`第${round}次`);
+    setBattleEncounterMonster(`${monsterName} x${monsterCount}`);
+    return;
+  }
+  resetBattleEncounterMonster();
+}
+
 function appendBattleLog(data, kind) {
   const box = document.getElementById('battle-log');
   const line = document.createElement('div');
@@ -1588,18 +1618,13 @@ function appendBattlePacketLine(record) {
 async function onBattleResponse(data) {
   updateBattleState(data?.battle_state || {});
   if (battleLogMode === 'detail') appendBattleLog(data, 'response');
-  const monsterName = String(data?.monster_name || '').trim();
-  const monsterCount = Number(data?.monster_count || 0);
-  if (data?.de07_status === 'normal' && monsterName && monsterCount > 0) {
-    const n = Number(data?.battle_state?.total_count || battleState.total_count || 0) + 1;
-    const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    appendBattleLog({ raw_text: `【${t}】 第${n}次 遭遇：${monsterName} x${monsterCount}` }, 'response');
-  }
+  updateBattleEncounterMonster(data);
   appendLadderBattleLogFromEvent('response', data);
 }
 
 function onBattleEnd(data) {
   updateBattleState(data?.battle_state || {});
+  resetBattleEncounterMonster();
   if (data?.no_energy) {
     appendBattleLog({ raw_text: '内力不足' }, 'end');
     appendLadderBattleLog('内力不足，天梯战斗结束', 'end');
@@ -1628,6 +1653,7 @@ function buildE207SettlementDisplayText(data) {
 
 function onBattleSettlementE207(data) {
   updateBattleState(data?.battle_state || {});
+  resetBattleEncounterMonster();
   const raw = String(data?.raw_text || '');
   const settlementBody = buildE207SettlementDisplayText(data) || raw;
   if (raw.includes('失去') || data?.outcome === 'defeat') {
@@ -1784,6 +1810,7 @@ function syncBattleLoopButton() {
 
 function clearBattleLog() {
   document.getElementById('battle-log').innerHTML = '';
+  resetBattleEncounterMonster();
 }
 
 function onBattleLogModeChange() {
